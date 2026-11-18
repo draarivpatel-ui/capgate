@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'self'">
+  <title>CapGate - Agent Tool-Call Capability Firewall &amp; Shell-AST Benchmark</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-wrap">
+      <div class="brand-mark" aria-hidden="true">CG</div>
+      <div>
+        <h1 class="brand-title">CapGate</h1>
+        <p class="brand-sub">Deterministic agent capability firewall, recursive shell-AST unwrapper, and bypass lab</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" id="btn-run-suite" class="btn btn-primary">Run 36-Case Benchmark</button>
+      <button type="button" id="btn-export-sarif" class="btn btn-secondary">Export SARIF 2.1.0</button>
+      <button type="button" id="btn-export-receipt" class="btn btn-secondary">Export Policy Receipt</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="panel left-rail" aria-label="Corpus probes and capability policy">
+      <section class="rail-section">
+        <div class="panel-head">
+          <h2>Capability Policy</h2>
+          <button type="button" id="btn-reset-policy" class="btn btn-small btn-secondary">Reset</button>
+        </div>
+        <div class="policy-grid">
+          <label class="field">
+            <span>Workspace Root</span>
+            <input id="policy-root" type="text" value="/workspace/app">
+          </label>
+          <label class="field">
+            <span>Max Shell Nesting Depth</span>
+            <input id="policy-depth" type="number" min="0" max="6" value="2">
+          </label>
+          <label class="check-field">
+            <input id="policy-net" type="checkbox">
+            <span>Allow Outbound Network</span>
+          </label>
+          <label class="check-field">
+            <input id="policy-ssrf" type="checkbox" checked>
+            <span>Block Private / Encoded IPs</span>
+          </label>
+          <label class="check-field">
+            <input id="policy-secrets" type="checkbox">
+            <span>Allow Secret Env Vars</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="rail-section">
+        <div class="panel-head">
+          <h2>Adversarial Corpus (36)</h2>
+        </div>
+        <label class="field">
+          <span>Filter by Family</span>
+          <select id="family-filter"></select>
+        </label>
+        <div id="corpus-list" class="corpus-list"></div>
+      </section>
+    </aside>
+
+    <section class="main-col" aria-label="Tool-call inspection and benchmark">
+      <section class="kpi-strip">
+        <article class="kpi-card">
+          <span class="kpi-label">CapGate Decision</span>
+          <strong id="kpi-decision" class="kpi-value">-</strong>
+          <span id="kpi-risk" class="kpi-foot">-</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">AST Unwrap Depth</span>
+          <strong id="kpi-depth" class="kpi-value">-</strong>
+          <span id="kpi-cmds" class="kpi-foot">-</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Naive Regex</span>
+          <strong id="kpi-naive" class="kpi-value">-</strong>
+          <span class="kpi-foot">Raw keyword check</span>
+        </article>
+        <article class="kpi-card">
+          <span class="kpi-label">Flat First-Token</span>
+          <strong id="kpi-flat" class="kpi-value">-</strong>
+          <span class="kpi-foot">No wrapper/heredoc unwrap</span>
+        </article>
+      </section>
+
+      <article class="panel inspector-panel">
+        <div class="panel-head">
+          <h2>Live Tool-Call Firewall Inspector</h2>
+          <div class="inspector-actions">
+            <button type="button" id="btn-apply-safe" class="btn btn-small btn-primary" hidden>Apply Safe Rewrite</button>
+          </div>
+        </div>
+        <div class="tool-inputs">
+          <label class="field">
+            <span>Tool Type</span>
+            <select id="tool-select">
+              <option value="shell_exec">shell_exec</option>
+              <option value="fs_read">fs_read</option>
+              <option value="fs_write">fs_write</option>
+              <option value="http_fetch">http_fetch</option>
+              <option value="env_read">env_read</option>
+            </select>
+          </label>
+          <label class="field field-grow">
+            <span id="arg-label">Command / Argument Payload</span>
+            <textarea id="arg-input" rows="4" spellcheck="false"></textarea>
+          </label>
+        </div>
+
+        <div class="split-detail">
+          <div>
+            <h3>Capability Findings</h3>
+            <div id="findings-list" class="findings-list"></div>
+          </div>
+          <div>
+            <h3>Unwrapped AST Provenance</h3>
+            <div id="ast-list" class="ast-list"></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel benchmark-panel">
+        <div class="panel-head">
+          <h2>36-Case Adversarial Benchmark Comparison</h2>
+          <span id="bench-digest" class="muted-mono">Digest: computing...</span>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Detector</th>
+                <th>Precision</th>
+                <th>Recall</th>
+                <th>F1</th>
+                <th>Accuracy</th>
+                <th>False Positive Rate</th>
+                <th>TP / FP / TN / FN</th>
+              </tr>
+            </thead>
+            <tbody id="detector-tbody"></tbody>
+          </table>
+        </div>
+        <div id="category-bars" class="category-bars"></div>
+        <p class="scope-note">
+          Scope: Static in-browser and Node shell-AST plus capability analysis over an authored 36-case corpus.
+          Does not execute commands or replace OS/kernel container isolation. Policy digests use SHA-256 and are unsigned local hashes.
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>CapGate deterministic capability firewall (MIT License). Offline static analyzer with zero network connections.</span>
+  </footer>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
