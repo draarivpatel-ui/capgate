@@ -101,3 +101,27 @@ test('policy toggle allowNetwork permits allowlisted domain and blocks unknown e
   );
   assert.equal(ssrfStillBlocked.blocked, true);
 });
+
+test('SSRF check covers every IPv6 spelling and targets written without an http(s) scheme', () => {
+  for (const host of ['::0001', '[::0001]', '::', '0::', '::0', '::1%lo0', '64:ff9b::7f00:1', '::ffff:a00:1', 'fe80::1', 'fd00::1']) {
+    assert.equal(isPrivateOrInternalHost(host), true, host);
+  }
+  for (const host of ['2606:4700:4700::1111', '::ffff:5db8:d822', '64:ff9b::5db8:d822', 'feed.example.com', 'fc.example.com']) {
+    assert.equal(isPrivateOrInternalHost(host), false, host);
+  }
+
+  const policy = { ...DEFAULT_POLICY, allowNetwork: true };
+  const fetchDecision = (url) => evaluateToolCall({ tool: 'http_fetch', args: { url } }, policy).decision;
+  for (const url of ['169.254.169.254/latest/meta-data', '//169.254.169.254/x', 'ftp://127.0.0.1/', 'gopher://127.0.0.1:6379/_x', 'http://[::0001]/']) {
+    assert.equal(fetchDecision(url), 'DENY', url);
+  }
+  assert.equal(fetchDecision('https://example.com/'), 'ALLOW');
+  assert.equal(fetchDecision('example.com/docs'), 'ALLOW');
+
+  const shellDecision = (command) => evaluateToolCall({ tool: 'shell_exec', args: { command } }, policy).decision;
+  for (const command of ['curl 127.0.0.1:8080', 'curl localhost:3000', 'wget 10.0.0.5/secret', 'curl [::1]:8080', 'curl db.internal/x', 'curl -s ftp://10.0.0.5/x']) {
+    assert.equal(shellDecision(command), 'DENY', command);
+  }
+  assert.equal(shellDecision('curl https://example.com'), 'ALLOW');
+  assert.equal(shellDecision('curl -o out.txt example.com/file'), 'ALLOW');
+});
