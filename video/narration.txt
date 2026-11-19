@@ -1,0 +1,11 @@
+Coding agents run shell commands for you, and most guards check either a list of bad words or the first word of the command. CapGate checks what actually runs.
+
+Here is the first hidden attack. timeout 10 nohup pkill. A first word check sees timeout and lets it through. The keyword scan finds nothing either. CapGate unwraps timeout, then nohup, finds pkill underneath, and denies it. The trace shows every layer and the rule that fired.
+
+Next. A heredoc piped into bash, with netcat opening a reverse shell inside it. Both baselines allow it. CapGate reads the heredoc as a script, finds nc, and blocks it.
+
+One more. The cloud metadata address, written in hex. CapGate decodes the IP and blocks the fetch.
+
+Now open it in the inspector. I can edit the command or change the policy, and the gauge, verdicts and trace update right away. Turn off private IP blocking and the fetch is still denied, because outbound network is off too, so the rules back each other up. A benign echo that only mentions rm dash rf is allowed, which the keyword scan gets wrong.
+
+Across all 36 cases, CapGate blocks 24 of 24 attacks with zero false alarms. The keyword regex blocks 10 and raises 2 false alarms. The first word gate blocks 2. The corpus was written alongside the engine, so the perfect score shows coverage of known patterns, not unseen ones, and the README lists the gaps I found, like npm run and inline python. It works in light or dark, offline, and exports SARIF. CapGate. Check what runs, not what it starts with.

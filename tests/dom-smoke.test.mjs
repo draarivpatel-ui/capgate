@@ -28,7 +28,7 @@ test('all DOM IDs used by js/app.js exist in index.html', () => {
 });
 
 test('all CapGate JS modules parse cleanly', () => {
-  const jsFiles = ['js/shell-ast.mjs', 'js/capability-gate.mjs', 'js/corpus.mjs', 'js/benchmark.mjs', 'js/app.js'];
+  const jsFiles = ['js/shell-ast.mjs', 'js/capability-gate.mjs', 'js/corpus.mjs', 'js/benchmark.mjs', 'js/viewmodel.mjs', 'js/app.js'];
   for (const rel of jsFiles) {
     assert.doesNotThrow(() => {
       execFileSync(process.execPath, ['--check', path.join(ROOT, rel)], { stdio: 'pipe' });
@@ -59,4 +59,32 @@ test('repository hygiene checks pass with zero forbidden punctuation or local pa
     assert.equal(homePrefixRe.test(text), false, `Local path in ${file}`);
     assert.equal(mailRe.test(text), false, `Personal email domain in ${file}`);
   }
+});
+
+test('page loads nothing from outside the repository and keeps a strict CSP', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  for (const m of html.matchAll(/<(?:script|link)\b[^>]*(?:src|href)="([^"]+)"/g)) {
+    assert.equal(/^https?:/i.test(m[1]), false, `external asset ${m[1]}`);
+  }
+  assert.match(html, /connect-src 'none'/);
+  assert.match(html, /style-src 'self'[;"]/);
+  assert.ok(!/\sstyle="/i.test(html), 'inline style attributes would be dropped by the CSP');
+  const css = fs.readFileSync(path.join(ROOT, 'styles.css'), 'utf8');
+  assert.equal(/@import|url\(\s*['"]?https?:/i.test(css), false);
+  assert.match(css, /prefers-color-scheme: dark/);
+  assert.match(css, /:root\[data-theme="dark"\]/);
+  assert.match(css, /prefers-reduced-motion/);
+});
+
+test('page has one h1, no skipped heading levels, and a title that stands alone', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  assert.equal((html.match(/<h1\b/g) || []).length, 1);
+  const levels = [...html.matchAll(/<h([1-6])\b/g)].map((m) => Number(m[1]));
+  for (let i = 1; i < levels.length; i += 1) assert.ok(levels[i] <= levels[i - 1] + 1);
+  assert.ok(!/brand-sub|tagline|eyebrow|kicker/.test(html));
+});
+
+test('app.js renders untrusted corpus and input text through textContent only', () => {
+  const appJs = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
+  assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(appJs), false);
 });
