@@ -91,6 +91,32 @@ export function parseIpv4Literal(host) {
   return nums;
 }
 
+function parseIpv6Groups(hostInput) {
+  let host = String(hostInput || '');
+  const zone = host.indexOf('%');
+  if (zone >= 0) host = host.slice(0, zone);
+  if (!host.includes(':') || !/^[0-9a-f:.]+$/.test(host)) return null;
+
+  const lastColon = host.lastIndexOf(':');
+  const tail = host.slice(lastColon + 1);
+  if (tail.includes('.')) {
+    const octets = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(tail) ? tail.split('.').map(Number) : null;
+    if (!octets || octets.some((n) => n > 255)) return null;
+    const hex = (hi, lo) => ((hi << 8) | lo).toString(16);
+    host = `${host.slice(0, lastColon + 1)}${hex(octets[0], octets[1])}:${hex(octets[2], octets[3])}`;
+  }
+
+  const halves = host.split('::');
+  if (halves.length > 2) return null;
+  const toGroups = (text) => (text === '' ? [] : text.split(':'));
+  const head = toGroups(halves[0]);
+  const rest = halves.length === 2 ? toGroups(halves[1]) : [];
+  if ([...head, ...rest].some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  const missing = 8 - head.length - rest.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  return [...head, ...new Array(halves.length === 2 ? missing : 0).fill('0'), ...rest].map((g) => Number.parseInt(g, 16));
+}
+
 function intToOctets(val) {
   return [(val >>> 24) & 255, (val >>> 16) & 255, (val >>> 8) & 255, val & 255];
 }
@@ -107,37 +133,28 @@ export function isPrivateOrInternalHost(hostInput) {
     return true;
   }
 
-  // IPv6 loopback / unspecified / link-local (fe80::/10) / unique local (fc00::/7)
-  if (
-    host === '::' ||
-    host === '::1' ||
-    /^(?:0+:){7}0*[01]$/.test(host) ||
-    /^(?:0+:){1,6}:0*1$/.test(host) ||
-    /^(?:fe[89ab][0-9a-f]:|f[cd][0-9a-f]{2}:)/.test(host)
-  ) {
-    return true;
+  // IPv6 literal in any spelling (compressed, zero-padded, zone id, embedded IPv4)
+  const groups = parseIpv6Groups(host);
+  if (groups) {
+    const leadingZero = (count) => groups.slice(0, count).every((g) => g === 0);
+    const tailOctets = [groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255];
+    // Unspecified (::) and loopback (::1)
+    if (leadingZero(7) && groups[7] <= 1) return true;
+    // Link-local (fe80::/10) and unique local (fc00::/7)
+    if ((groups[0] & 0xffc0) === 0xfe80 || (groups[0] & 0xfe00) === 0xfc00) return true;
+    // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d), and NAT64 (64:ff9b::/96)
+    if (
+      (leadingZero(5) && (groups[5] === 0xffff || groups[5] === 0)) ||
+      (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((g) => g === 0))
+    ) {
+      return isPrivateIpv4Octets(tailOctets);
+    }
+    return false;
   }
 
-  // IPv4-mapped or IPv4-compatible IPv6 (e.g., ::ffff:127.0.0.1, ::ffff:7f000001, 0:0:0:0:0:ffff:127.0.0.1, ::127.0.0.1)
-  const mappedMatch = /^(?:::ffff:|(?:0+:){5}0*ffff:)([0-9a-f.:]+)$/.exec(host) ||
-    /^(?:::|(?:0+:){6})([0-9]+\.[0-9.]+)$/.exec(host);
-  if (mappedMatch) {
-    const sub = mappedMatch[1];
-    if (sub.includes('.')) {
-      const octets = parseIpv4Literal(sub);
-      if (octets) return isPrivateIpv4Octets(octets);
-    } else if (/^[0-9a-f]{1,8}$/.test(sub)) {
-      const val = Number.parseInt(sub, 16);
-      if (Number.isInteger(val)) return isPrivateIpv4Octets(intToOctets(val));
-    } else {
-      const hexParts = sub.split(':');
-      if (hexParts.length === 2 && hexParts.every((p) => /^[0-9a-f]{1,4}$/.test(p))) {
-        const hi = Number.parseInt(hexParts[0], 16);
-        const lo = Number.parseInt(hexParts[1], 16);
-        return isPrivateIpv4Octets([(hi >> 8) & 255, hi & 255, (lo >> 8) & 255, lo & 255]);
-      }
-    }
-  }
+  // Non-standard IPv4-mapped spelling with the address as one hex word (::ffff:7f000001)
+  const mappedHex = /^(?:::ffff:|(?:0+:){5}0*ffff:)([0-9a-f]{5,8})$/.exec(host);
+  if (mappedHex) return isPrivateIpv4Octets(intToOctets(Number.parseInt(mappedHex[1], 16)));
 
   const octets = parseIpv4Literal(host);
   if (octets) return isPrivateIpv4Octets(octets);
@@ -170,6 +187,22 @@ export function extractUrlsAndHosts(text) {
     hosts.push({ url: m[0], host });
   }
   return hosts;
+}
+
+/**
+ * Host of a network target written with any scheme or none: "127.0.0.1:8080", "//host/x",
+ * "ftp://user@host/x", "[::1]:80". Returns '' when the text has no host part.
+ */
+export function extractTargetHost(target) {
+  let rest = String(target || '').trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^\/\//, '');
+  rest = rest.split(/[/?#]/)[0];
+  const atIdx = rest.lastIndexOf('@');
+  if (atIdx >= 0) rest = rest.slice(atIdx + 1);
+  if (rest.startsWith('[')) {
+    const endBracket = rest.indexOf(']');
+    return endBracket > 0 ? rest.slice(0, endBracket + 1) : rest;
+  }
+  return rest.replace(/:\d*$/, '');
 }
 
 /**
@@ -211,7 +244,7 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
   } else if (tool === 'http_fetch') {
     const rawUrl = String(args.url || '');
     const extracted = extractUrlsAndHosts(rawUrl);
-    const host = extracted[0]?.host || String(args.host || '');
+    const host = extracted[0]?.host || extractTargetHost(rawUrl) || String(args.host || '');
     if (policy.blockPrivateIps && isPrivateOrInternalHost(host)) {
       addFinding('CAP-SSRF-01', 'critical', 'Internal or metadata SSRF target blocked',
         `Host "${host}" resolves to loopback, private RFC1918, or cloud metadata range.`, [tool],
@@ -260,8 +293,8 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
       } else if (netCmdSet.has(rec.command)) {
         // Inspect URLs / hosts in args
         const urlHits = extractUrlsAndHosts(rec.args.join(' '));
-        const bareHostArg = rec.args.find((a) => !a.startsWith('-') && (parseIpv4Literal(a) || a.includes('localhost') || a.includes('169.254')));
-        if (policy.blockPrivateIps && (urlHits.some((u) => isPrivateOrInternalHost(u.host)) || (bareHostArg && isPrivateOrInternalHost(bareHostArg)))) {
+        const internalTargetArg = rec.args.some((a) => !a.startsWith('-') && isPrivateOrInternalHost(extractTargetHost(a)));
+        if (policy.blockPrivateIps && (urlHits.some((u) => isPrivateOrInternalHost(u.host)) || internalTargetArg)) {
           addFinding('CAP-SSRF-01', 'critical', `SSRF internal/metadata probe via "${rec.command}"`,
             `Internal or encoded IP target in [${rec.trail.join(' -> ')}].`,
             rec.trail, 'Disallow outbound requests to internal/metadata addresses.');
