@@ -22,7 +22,9 @@ The top of the page cycles through the 13 attacks in the corpus that both baseli
 - **Risk gauge and side-by-side verdicts** for the inspected call, plus a safe rewrite when one exists.
 - **Editable policy:** workspace root, maximum shell nesting depth, outbound network, private and encoded IP blocking, secret environment variables. Every change re-scores the call and the whole benchmark.
 - **Benchmark board:** one card per detector with recall, precision, F1 and false positive rate bars and a confusion matrix, and a family by detector grid of correct verdicts.
-- **Exports:** SARIF 2.1.0 for the whole corpus, and a policy receipt with an unsigned local SHA-256 digest.
+- **Live attack editor:** type any command in the hero and watch the verdict, risk score and firing rules update as you type. Family chips jump to a class of hidden attack.
+- **Policy-diff explainer:** for every proof case, the hero shows which baseline allowed the attack and which CapGate rule caught it.
+- **Verifiable receipts:** SARIF 2.1.0 for the whole corpus, plus a policy receipt with a canonical SHA-256 digest and integrity signature. Paste a receipt into the verify panel to see VALID or TAMPERED with the changed field.
 - **Light and dark themes** that follow the system setting, with a toggle.
 
 ## Benchmark
@@ -40,18 +42,21 @@ Read these numbers for what they are. The corpus was written by the same author 
 ## Limitations
 
 - CapGate is static analysis. It never executes a command, does not sandbox system calls, and does not replace OS or container isolation.
-- An allowlisted tool can still run other code, and CapGate trusts the allowlist. Probed on the default policy, all of these are allowed: inline code in `python3 -c "import os; os.remove('x')"` or `node -e`, `npm run clean` (which runs whatever `package.json` says), and `git -c core.pager=sh log`. Tighten the allowlist for real use.
+- Unknown tools and missing tool names are denied by default. Empty required arguments escalate instead of silently allowing.
+- Inline interpreter code (`python3 -c`, `node -e`, `ruby -e`, `npx`, arbitrary `npm run <script>`) is blocked or escalated; shell-shaped payloads are scanned recursively for hidden blocked commands. `npm test` and `npm start` remain allowed as conventional entrypoints. Set `allowInlineCode: true` only for trusted one-offs.
+- Git execution-config overrides (`core.pager`, `core.editor`, `alias.*`, `-c`, `-c=`, `--config-env=`) are blocked. `git push` without `--dry-run` is held for human review.
+- Path inspection normalizes repeated percent-encoding, overlong UTF-8, NUL/control bytes, fullwidth lookalikes, backslash separators, `....//`, `..;/` and escaped-dot forms before checking traversal, workspace confinement and sensitive files.
 - Unlisted commands such as `eval` or `find` are not denied outright; they get the `ESCALATE` decision, which holds the call for a human instead of running it.
 - Shell syntax is large, and constructs the parser does not model can hide a command.
 - The 36-case corpus is small and was not written by an independent red team.
-- Policy receipts are unsigned SHA-256 hashes for local integrity checks, not signatures.
+- Receipts are tamper-evident: any edit to the covered fields breaks the canonical SHA-256 and the derived integrity signature. The key is derived from the receipt payload itself, so this proves integrity against accidental or casual tampering, not authenticity against a party that can rewrite the whole artifact.
 
 ## Run it and test it
 
 Node 18 or newer, nothing to install.
 
 ```bash
-npm test                 # 27 tests: shell parser, capability gate, view models, page checks
+npm test                 # 45 tests: shell parser, capability gate, hardening, receipts, view models, page checks
 npm run eval             # benchmark table
 npm run eval:check       # fails if CapGate drops below F1 0.98, gains a false positive, or stops beating both baselines
 npm run eval:json        # full report with every row
@@ -61,10 +66,11 @@ python3 -m http.server   # then open http://localhost:8000/
 | File | What it holds |
 | --- | --- |
 | `js/shell-ast.mjs` | Tokenizer and recursive unwrapper for wrappers, `-c` shells, heredocs and substitutions |
-| `js/capability-gate.mjs` | Policy, rules, baselines, SARIF export |
+| `js/capability-gate.mjs` | Policy, rules, deny-by-default, normalization, baselines, SARIF export |
+| `js/hash.mjs`, `js/receipt.mjs` | Dependency-free SHA-256 / HMAC and canonical tamper-evident receipts |
 | `js/corpus.mjs`, `js/benchmark.mjs` | The 36 cases and the scoring |
 | `js/viewmodel.mjs` | Pure models for the trace, gauge, verdicts, detector cards and family grid |
-| `js/app.js` | Page controller; all text goes through `textContent` |
+| `js/app.js` | Page controller; live attack editor, policy diff, receipt verify; text via `textContent` |
 | `video/` | Demo walkthrough steps and narration |
 
 ## License

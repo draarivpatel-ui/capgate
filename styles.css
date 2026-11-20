@@ -1213,6 +1213,194 @@ textarea {
   font-size: 0.82rem;
 }
 
+/* Hero decision, live attack editor, family chips ---------------------- */
+
+.hero-decision {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.hero-decision-word {
+  display: grid;
+  gap: 2px;
+  align-content: center;
+  padding: 20px 22px;
+  border: 1px solid var(--deny);
+  border-radius: var(--radius);
+  background: var(--deny-soft);
+}
+
+.hero-verdict {
+  display: block;
+  font-size: clamp(2.6rem, 2rem + 3vw, 4.2rem);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--deny);
+}
+
+.hero-decision-word[data-state="allow"] {
+  border-color: var(--allow);
+  background: var(--allow-soft);
+}
+
+.hero-decision-word[data-state="allow"] .hero-verdict {
+  color: var(--allow-ink);
+}
+
+.hero-decision-word[data-state="escalate"] {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.hero-decision-word[data-state="escalate"] .hero-verdict {
+  color: var(--warn);
+}
+
+.hero-verdict-sub {
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: var(--ink-2);
+}
+
+.hero-diff {
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.hero-diff-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+.hero-diff-body {
+  display: grid;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+
+.diff-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.diff-who {
+  font-weight: 700;
+}
+
+.diff-what {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.diff-why {
+  color: var(--ink-2);
+  font-size: 0.82rem;
+}
+
+.family-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.family-chip {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 600 0.8rem/1.2 var(--font-sans);
+  cursor: pointer;
+}
+
+.family-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.family-chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.attack-edit {
+  margin-top: 2px;
+}
+
+.attack-live {
+  min-height: 22px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.attack-live[data-state="deny"] {
+  color: var(--deny-ink);
+}
+
+.attack-live[data-state="escalate"] {
+  color: var(--warn);
+}
+
+.attack-live[data-state="allow"] {
+  color: var(--allow-ink);
+}
+
+.verify-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.verify-intro {
+  color: var(--ink-2);
+  font-size: 0.88rem;
+}
+
+.verify-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.verify-result {
+  font-weight: 700;
+}
+
+.verify-result[data-state="valid"] {
+  color: var(--allow-ink);
+}
+
+.verify-result[data-state="tampered"],
+.verify-result[data-state="malformed"] {
+  color: var(--deny-ink);
+}
+
+@media (max-width: 860px) {
+  .hero-decision {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Footer ------------------------------------------------------------- */
 
 .footer {
@@ -1301,7 +1489,7 @@ textarea {
   }
 
   .offline-pill {
-    display: none;
+    display: inline-flex;
   }
 
   .metric-row {

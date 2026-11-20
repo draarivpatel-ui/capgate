@@ -28,7 +28,7 @@ test('all DOM IDs used by js/app.js exist in index.html', () => {
 });
 
 test('all CapGate JS modules parse cleanly', () => {
-  const jsFiles = ['js/shell-ast.mjs', 'js/capability-gate.mjs', 'js/corpus.mjs', 'js/benchmark.mjs', 'js/viewmodel.mjs', 'js/app.js'];
+  const jsFiles = ['js/shell-ast.mjs', 'js/capability-gate.mjs', 'js/corpus.mjs', 'js/benchmark.mjs', 'js/viewmodel.mjs', 'js/hash.mjs', 'js/receipt.mjs', 'js/app.js'];
   for (const rel of jsFiles) {
     assert.doesNotThrow(() => {
       execFileSync(process.execPath, ['--check', path.join(ROOT, rel)], { stdio: 'pipe' });
@@ -87,4 +87,40 @@ test('page has one h1, no skipped heading levels, and a title that stands alone'
 test('app.js renders untrusted corpus and input text through textContent only', () => {
   const appJs = fs.readFileSync(path.join(ROOT, 'js/app.js'), 'utf8');
   assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(appJs), false);
+});
+
+test('hero decision is visually dominant and offline claim is visible at all widths', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'styles.css'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  assert.match(html, /id="hero-verdict"/);
+  const heroSize = /\.hero-verdict\s*\{[^}]*font-size:\s*clamp\(([\d.]+)rem/.exec(css);
+  assert.ok(heroSize, 'hero verdict has a large clamp() font size');
+  assert.ok(Number(heroSize[1]) >= 2, 'hero verdict base font size is at least 2rem');
+  const sectionTitle = /\.section-title\s*\{[^}]*font-size:\s*clamp\(([\d.]+)rem/.exec(css);
+  assert.ok(sectionTitle && Number(heroSize[1]) > Number(sectionTitle[1]), 'hero beats section titles');
+  assert.ok(!/\.offline-pill\s*\{\s*display:\s*none/.test(css), 'offline pill is not hidden');
+  assert.ok(!/html\s*\{[^}]*scroll-behavior:\s*smooth/.test(css), 'no smooth scroll');
+});
+
+test('no real vendor key prefixes, assistant branding, or long dashes in shipped text', () => {
+  const walk = (dir) => {
+    const out = [];
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name === '.git' || ent.name === 'node_modules' || ent.name === 'video') continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) out.push(...walk(full));
+      else out.push(full);
+    }
+    return out;
+  };
+  const textExts = new Set(['.html', '.css', '.js', '.mjs', '.md', '.json', '.txt']);
+  for (const file of walk(ROOT)) {
+    if (!textExts.has(path.extname(file).toLowerCase())) continue;
+    const text = fs.readFileSync(file, 'utf8');
+    const vendorRe = new RegExp(`\\b${'sk'}-[A-Za-z0-9]{12}\\b|\\b${'ghp'}_[A-Za-z0-9]{12}\\b|\\b${'tskey'}-[A-Za-z0-9]{12}\\b`);
+    const aiRe = new RegExp(`\\b${'A'}${'I'}\\b`);
+    assert.equal(vendorRe.test(text), false, `vendor key in ${file}`);
+    assert.equal(aiRe.test(text), false, `assistant branding in ${file}`);
+    assert.equal(text.includes(String.fromCharCode(0x2014)) || text.includes(String.fromCharCode(0x2013)), false, `dash in ${file}`);
+  }
 });

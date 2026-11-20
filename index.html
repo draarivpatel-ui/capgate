@@ -33,6 +33,7 @@
         </button>
         <button type="button" id="btn-export-sarif" class="btn btn-secondary">Export SARIF</button>
         <button type="button" id="btn-export-receipt" class="btn btn-secondary">Export receipt</button>
+        <button type="button" id="btn-verify-receipt" class="btn btn-secondary">Verify receipt</button>
       </div>
     </div>
   </header>
@@ -42,11 +43,24 @@
       <div class="proof-head">
         <h2 id="proof-heading" class="section-title">Ten-second proof</h2>
         <div class="proof-controls">
-          <span id="proof-position" class="proof-position mono">1 / 13</span>
+          <span id="proof-position" class="proof-position mono">1 / 13 hidden attacks</span>
           <button type="button" id="btn-proof-next" class="btn btn-primary">Next hidden attack</button>
           <button type="button" id="btn-proof-inspect" class="btn btn-secondary">Open in inspector</button>
         </div>
       </div>
+
+      <div class="hero-decision">
+        <div class="hero-decision-word">
+          <strong id="hero-verdict" class="hero-verdict mono">BLOCK</strong>
+          <span id="hero-verdict-sub" class="hero-verdict-sub">CapGate decision for this attack</span>
+        </div>
+        <div class="hero-diff" id="hero-diff">
+          <span class="hero-diff-label">Baseline gap</span>
+          <div id="hero-diff-body" class="hero-diff-body"></div>
+        </div>
+      </div>
+
+      <div class="family-chips" id="family-chips" role="group" aria-label="Jump to attack family"></div>
 
       <div class="proof-grid">
         <article class="proof-attack" aria-labelledby="proof-title">
@@ -55,6 +69,11 @@
             <span id="proof-meta" class="chip mono"></span>
           </div>
           <pre id="proof-command" class="proof-command mono"></pre>
+          <label class="field attack-edit">
+            <span>Try your own bypass, verdict updates as you type</span>
+            <textarea id="attack-editor" rows="2" spellcheck="false" aria-label="Edit the attack command"></textarea>
+          </label>
+          <div class="attack-live" id="attack-live" aria-live="polite"></div>
           <ol id="proof-trace" class="trace" aria-label="Decision trace"></ol>
         </article>
 
@@ -189,8 +208,24 @@
         <div id="family-matrix" class="family-matrix" role="table" aria-label="Correct verdicts by family and detector"></div>
       </div>
       <p class="scope-note">
-        Scores measure the authored 36-case corpus (24 unsafe calls in six families, 12 benign traps), not every possible escape. CapGate is a static analyzer: it never executes commands and does not replace OS or container isolation. Policy digests are unsigned local SHA-256 hashes.
+        Scores measure the authored 36-case corpus (24 unsafe calls in six families, 12 benign traps), not every possible escape. CapGate is a static analyzer: it never executes commands and does not replace OS or container isolation. Receipts carry a canonical SHA-256 digest plus an integrity signature you can verify below.
       </p>
+    </section>
+
+    <section class="panel verify-panel" aria-labelledby="verify-heading">
+      <div class="panel-head">
+        <h2 id="verify-heading" class="section-title">Receipt verification</h2>
+        <span class="chip mono">paste a receipt to check integrity</span>
+      </div>
+      <p class="verify-intro">Export a receipt above, then paste its JSON here. Any edit to the policy, tool call, evaluation or digest is detected as TAMPERED.</p>
+      <label class="field">
+        <span>Receipt JSON</span>
+        <textarea id="verify-input" rows="6" spellcheck="false" aria-label="Receipt JSON to verify"></textarea>
+      </label>
+      <div class="verify-actions">
+        <button type="button" id="btn-verify-run" class="btn btn-primary">Verify integrity</button>
+        <span id="verify-result" class="verify-result" aria-live="polite"></span>
+      </div>
     </section>
   </main>
 

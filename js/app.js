@@ -7,6 +7,8 @@ import {
 } from './capability-gate.mjs';
 import { ADVERSARIAL_CORPUS } from './corpus.mjs';
 import { runCapGateBenchmark } from './benchmark.mjs';
+import { buildReceipt, verifyReceipt } from './receipt.mjs';
+import { canonicalJson, sha256Hex } from './hash.mjs';
 import {
   DETECTORS,
   gaugeArc,
@@ -25,6 +27,8 @@ const state = {
   lastBench: null,
   proofIds: [],
   proofIndex: 0,
+  proofFamily: 'All',
+  attackCommand: '',
 };
 
 const els = {
@@ -69,6 +73,16 @@ const els = {
   proofPosition: document.getElementById('proof-position'),
   btnProofNext: document.getElementById('btn-proof-next'),
   btnProofInspect: document.getElementById('btn-proof-inspect'),
+  heroVerdict: document.getElementById('hero-verdict'),
+  heroVerdictSub: document.getElementById('hero-verdict-sub'),
+  heroDiffBody: document.getElementById('hero-diff-body'),
+  familyChips: document.getElementById('family-chips'),
+  attackEditor: document.getElementById('attack-editor'),
+  attackLive: document.getElementById('attack-live'),
+  btnVerifyReceipt: document.getElementById('btn-verify-receipt'),
+  verifyInput: document.getElementById('verify-input'),
+  btnVerifyRun: document.getElementById('btn-verify-run'),
+  verifyResult: document.getElementById('verify-result'),
 };
 
 /** Small element builder. Text always goes through textContent, never parsed as markup. */
@@ -134,6 +148,15 @@ function init() {
   els.btnRunSuite.addEventListener('click', renderBenchmark);
   els.btnExportSarif.addEventListener('click', exportSarif);
   els.btnExportReceipt.addEventListener('click', exportReceipt);
+  els.btnVerifyReceipt.addEventListener('click', () => {
+    els.verifyInput.focus();
+    els.verifyInput.scrollIntoView({ block: 'center' });
+  });
+  els.btnVerifyRun.addEventListener('click', runVerifyReceipt);
+  els.attackEditor.addEventListener('input', () => {
+    state.attackCommand = els.attackEditor.value;
+    renderAttackLive();
+  });
   els.btnProofNext.addEventListener('click', () => {
     if (!state.proofIds.length) return;
     state.proofIndex = (state.proofIndex + 1) % state.proofIds.length;
@@ -337,11 +360,41 @@ function renderProof() {
   const naive = evaluateNaiveRegex(item.toolCall);
   const flat = evaluateFlatGate(item.toolCall, state.policy);
 
-  els.proofPosition.textContent = `${state.proofIndex + 1} / ${state.proofIds.length}`;
+  els.proofPosition.textContent = `${state.proofIndex + 1} / ${state.proofIds.length} hidden attacks`;
   els.proofMeta.textContent = `${item.category} | ${item.toolCall.tool}`;
   els.proofCommand.textContent = extractArgText(item.toolCall);
   document.getElementById('proof-title').textContent = item.title;
   renderTrace(els.proofTrace, buildDecisionTrace(item.toolCall, capgate));
+
+  // Hero decision word: the verdict is the biggest text on first paint.
+  els.heroVerdict.textContent = capgate.decision;
+  els.heroVerdictSub.textContent = `${capgate.findingCount} finding${capgate.findingCount === 1 ? '' : 's'}, risk ${capgate.riskScore}/100`;
+  const heroWord = els.heroVerdict.parentElement;
+  heroWord.dataset.state = capgate.decision === 'ESCALATE' ? 'escalate' : capgate.blocked ? 'deny' : 'allow';
+
+  // Policy-diff explainer: which baseline missed it, and which rule caught it.
+  const rules = [...new Set(capgate.findings.map((f) => f.ruleId))].slice(0, 3).join(', ') || 'none';
+  els.heroDiffBody.textContent = '';
+  const missed = [
+    { name: 'Keyword regex', hit: naive.blocked, why: naivedWhy(naive) },
+    { name: 'First-word gate', hit: flat.blocked, why: 'only checks the first token' },
+  ].filter((d) => !d.hit);
+  if (missed.length === 0) missed.push({ name: 'Both baselines', hit: false, why: 'flagged this call' });
+  for (const d of missed) {
+    const row = h('div', 'diff-row');
+    row.append(
+      h('strong', 'diff-who', d.name),
+      h('span', 'diff-what', 'ALLOW'),
+      h('span', 'diff-why', `${d.why}; CapGate fired ${rules}`),
+    );
+    els.heroDiffBody.appendChild(row);
+  }
+
+  // Family chips: one click jumps to any attack family in the proof set.
+  renderFamilyChips();
+  els.attackEditor.value = extractArgText(item.toolCall);
+  state.attackCommand = els.attackEditor.value;
+  renderAttackLive();
 
   els.proofVerdicts.textContent = '';
   for (const v of buildVerdicts({ naive, flat, capgate }, item.expectedBlocked)) {
@@ -356,6 +409,49 @@ function renderProof() {
     );
     els.proofVerdicts.appendChild(card);
   }
+}
+
+function naivedWhy(naive) {
+  if (!naive.hits || naive.hits.length === 0) return 'raw text has no keyword hit';
+  return `saw ${naive.hits.join(', ')} in raw text`;
+}
+
+function renderFamilyChips() {
+  els.familyChips.textContent = '';
+  const families = ['All', ...new Set(ADVERSARIAL_CORPUS.filter((c) => c.expectedBlocked).map((c) => c.category))];
+  for (const fam of families) {
+    const chip = h('button', `family-chip${state.proofFamily === fam ? ' active' : ''}`, fam);
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', String(state.proofFamily === fam));
+    chip.addEventListener('click', () => {
+      state.proofFamily = fam;
+      const ids = state.proofIds.filter((id) => {
+        const c = ADVERSARIAL_CORPUS.find((x) => x.id === id);
+        return c && (fam === 'All' || c.category === fam);
+      });
+      if (ids.length) {
+        state.proofIds = ids;
+        state.proofIndex = 0;
+        renderProof();
+      }
+    });
+    els.familyChips.appendChild(chip);
+  }
+}
+
+function renderAttackLive() {
+  const raw = state.attackCommand;
+  if (!raw.trim()) {
+    els.attackLive.textContent = 'Type a command to see the live verdict.';
+    els.attackLive.dataset.state = 'allow';
+    return;
+  }
+  const item = ADVERSARIAL_CORPUS.find((c) => c.id === state.proofIds[state.proofIndex]);
+  const tool = item?.toolCall?.tool || 'shell_exec';
+  const argKey = { fs_read: 'path', fs_write: 'path', http_fetch: 'url', env_read: 'name' }[tool] || 'command';
+  const ev = evaluateToolCall({ tool, args: { [argKey]: raw } }, state.policy);
+  els.attackLive.textContent = `${ev.decision} · ${ev.findingCount} finding${ev.findingCount === 1 ? '' : 's'} · risk ${ev.riskScore}/100 · ${ev.findings.slice(0, 2).map((f) => f.ruleId).join(', ') || 'no rule fired'}`;
+  els.attackLive.dataset.state = ev.decision === 'ESCALATE' ? 'escalate' : ev.blocked ? 'deny' : 'allow';
 }
 
 function renderScoreStrip(bench) {
@@ -379,13 +475,21 @@ function renderScoreStrip(bench) {
 
 /* Benchmark ------------------------------------------------------------ */
 
-async function renderBenchmark() {
+function renderBenchmark() {
   const bench = runCapGateBenchmark(ADVERSARIAL_CORPUS, state.policy);
   state.lastBench = bench;
 
-  const proofIds = proofCases(bench);
+  let proofIds = proofCases(bench);
+  if (!proofIds.length) proofIds = bench.rows.filter((r) => r.expectedBlocked).map((r) => r.id);
+  if (state.proofFamily !== 'All') {
+    const filtered = proofIds.filter((id) => {
+      const c = ADVERSARIAL_CORPUS.find((x) => x.id === id);
+      return c && c.category === state.proofFamily;
+    });
+    if (filtered.length) proofIds = filtered;
+  }
   const keep = state.proofIds[state.proofIndex];
-  state.proofIds = proofIds.length ? proofIds : bench.rows.filter((r) => r.expectedBlocked).map((r) => r.id);
+  state.proofIds = proofIds;
   state.proofIndex = Math.max(0, state.proofIds.indexOf(keep));
   renderProof();
   renderScoreStrip(bench);
@@ -444,14 +548,8 @@ async function renderBenchmark() {
     els.familyMatrix.appendChild(r);
   }
 
-  const digest = await sha256Hex(JSON.stringify({ policy: state.policy, detectors: bench.detectors }));
+  const digest = sha256Hex(canonicalJson({ policy: state.policy, detectors: bench.detectors }));
   els.benchDigest.textContent = `SHA-256 ${digest.slice(0, 16)}`;
-}
-
-async function sha256Hex(str) {
-  if (!globalThis.crypto?.subtle) return 'unavailable';
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function exportSarif() {
@@ -460,17 +558,39 @@ function exportSarif() {
   triggerDownload('capgate-corpus.sarif.json', JSON.stringify(sarif, null, 2), 'application/sarif+json');
 }
 
-async function exportReceipt() {
-  const payload = {
-    tool: 'CapGate',
-    version: '1.1.0',
-    signatureStatus: 'unsigned-local-sha256',
+function exportReceipt() {
+  const receipt = buildReceipt({
     policy: state.policy,
-    inspectedToolCall: state.toolCall,
+    toolCall: state.toolCall,
     evaluation: state.lastEval,
-  };
-  payload.sha256 = await sha256Hex(JSON.stringify(payload));
-  triggerDownload('capgate-policy-receipt.json', JSON.stringify(payload, null, 2), 'application/json');
+    benchmark: state.lastBench ? {
+      version: state.lastBench.version,
+      corpusCount: state.lastBench.corpusCount,
+      detectors: state.lastBench.detectors,
+    } : null,
+  });
+  triggerDownload('capgate-policy-receipt.json', JSON.stringify(receipt, null, 2), 'application/json');
+}
+
+function runVerifyReceipt() {
+  const raw = els.verifyInput.value.trim();
+  els.verifyResult.textContent = '';
+  if (!raw) {
+    els.verifyResult.textContent = 'Paste a receipt first.';
+    els.verifyResult.dataset.state = 'malformed';
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    els.verifyResult.textContent = 'MALFORMED: not valid JSON.';
+    els.verifyResult.dataset.state = 'malformed';
+    return;
+  }
+  const result = verifyReceipt(parsed);
+  els.verifyResult.textContent = `${result.status}${result.changedFields.length ? ` (${result.changedFields.join(', ')})` : ''}: ${result.detail}`;
+  els.verifyResult.dataset.state = result.status.toLowerCase();
 }
 
 function triggerDownload(filename, text, mime) {

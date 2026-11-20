@@ -86,7 +86,7 @@ export function runCapGateBenchmark(corpus = ADVERSARIAL_CORPUS, policy = DEFAUL
   }
 
   return {
-    version: '1.0.0',
+    version: '1.1.0',
     corpusCount: corpus.length,
     unsafeCount: truth.filter(Boolean).length,
     benignCount: truth.filter((t) => !t).length,
