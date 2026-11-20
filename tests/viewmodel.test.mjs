@@ -33,7 +33,7 @@ test('decision trace follows the unwrapped layers and pins each rule to the laye
   assert.equal(rm.depth, 1);
   assert.equal(rm.rule, 'CAP-CMD-01');
   assert.equal(rm.severity, 'critical');
-  assert.equal(rm.trail, 'sh > -c > rm');
+  assert.equal(rm.trail, 'xargs > sh > -c > rm');
   assert.equal(nodes.at(-1).label, 'DENY');
   assert.equal(nodes.at(-1).blocked, true);
 });

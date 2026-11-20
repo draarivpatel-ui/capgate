@@ -912,7 +912,6 @@ textarea {
   stroke: var(--allow);
   stroke-width: 10;
   stroke-linecap: round;
-  transition: d 400ms ease;
 }
 
 .gauge[data-state="deny"] .gauge-fill {

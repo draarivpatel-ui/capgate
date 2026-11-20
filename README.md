@@ -2,7 +2,7 @@
 
 **Live studio:** [https://aariv.me/capgate/](https://aariv.me/capgate/)
 
-CapGate is a firewall for the tool calls an autonomous coding agent makes. Before a `shell_exec`, `fs_read`, `fs_write`, `http_fetch` or `env_read` call runs, CapGate parses it, unwraps every layer of nested shell (`env`, `timeout`, `nohup`, `xargs`, `sh -c`, heredocs piped into `bash`, command substitution), and checks each real command, path, URL and variable against a typed capability policy. It runs offline in the browser or in Node, with no dependencies and no network access.
+CapGate is a firewall for the tool calls an autonomous coding agent makes. Before a `shell_exec`, `fs_read`, `fs_write`, `http_fetch` or `env_read` call runs, CapGate parses it, unwraps every layer of nested shell (`env`, `timeout`, `nohup`, `xargs`, `sh -c`, heredocs piped into `bash`, command substitution, interpreters fed code on stdin), and checks each real command, path, URL and variable against a typed capability policy. It runs offline in the browser or in Node, with no dependencies and no network access.
 
 ## The problem
 
@@ -42,10 +42,12 @@ Read these numbers for what they are. The corpus was written by the same author 
 ## Limitations
 
 - CapGate is static analysis. It never executes a command, does not sandbox system calls, and does not replace OS or container isolation.
-- Unknown tools and missing tool names are denied by default. Empty required arguments escalate instead of silently allowing.
-- Inline interpreter code (`python3 -c`, `node -e`, `ruby -e`, `npx`, arbitrary `npm run <script>`) is blocked or escalated; shell-shaped payloads are scanned recursively for hidden blocked commands. `npm test` and `npm start` remain allowed as conventional entrypoints. Set `allowInlineCode: true` only for trusted one-offs.
-- Git execution-config overrides (`core.pager`, `core.editor`, `alias.*`, `-c`, `-c=`, `--config-env=`) are blocked. `git push` without `--dry-run` is held for human review.
-- Path inspection normalizes repeated percent-encoding, overlong UTF-8, NUL/control bytes, fullwidth lookalikes, backslash separators, `....//`, `..;/` and escaped-dot forms before checking traversal, workspace confinement and sensitive files.
+- Unknown tools and missing tool names are denied by default. Empty required arguments escalate instead of silently allowing. A malformed policy shape (a string where an array belongs, a non-numeric depth) falls back to the safe default instead of disabling a rule.
+- Inline interpreter code (`python3 -c`, `node -e`, `ruby -e`, `npx`, arbitrary `npm run <script>`) is blocked or escalated; shell-shaped payloads are scanned recursively for hidden blocked commands. Program text fed to an interpreter through stdin (heredoc, pipe, `< file`) is held for review, and bare wrappers (`env`, bare `sudo`, bare `xargs`) are never silent allows. `npm test` and `npm start` remain allowed as conventional entrypoints; `npm install`, `npm ci`, `npm create`, `npm exec` and other lifecycle subcommands escalate because they run dependency code. Set `allowInlineCode: true` only for trusted one-offs.
+- Git execution-config overrides (`core.pager`, `core.editor`, `core.hooksPath`, `alias.*`, `-c`, `-c=`, `--config-env=`) are blocked. `git push` without `--dry-run` is held for human review, and hook-executing subcommands (`git commit`, `merge`, `rebase`, `pull`, `am`) escalate.
+- Path inspection normalizes repeated percent-encoding, overlong UTF-8, NUL/control bytes, fullwidth lookalikes, backslash separators, `....//`, `..;/`, escaped-dot forms, and space or NBSP padded traversal segments before checking traversal, workspace confinement and sensitive files. Windows drive-letter and UNC paths are always outside a POSIX workspace root, and Windows hive files (`config/SAM`, `Repair`) count as sensitive.
+- URL hosts are normalized before IP checks: ideographic and fullwidth dot and digit lookalikes, percent-encoded dots, NUL suffixes, IPv6 zone ids, and slash-less `http:host` forms are all decoded; wildcard-DNS rebinding services (`*.nip.io`, `*.sslip.io`, `localtest.me`, `lvh.me`) and bare `instance-data` are treated as internal.
+- Secret variable matching covers suffix forms (`*_KEY`, `*_PAT`, `*_PASS`, `*_CREDS`, `JWT`, `*_PASSPHRASE`, `*_SIGNING`) alongside the original name list, so `GITHUB_PAT` or `STRIPE_KEY` cannot slip through while `PATH_INFO` or `DEPLOY_PATTERN` stay allowed.
 - Unlisted commands such as `eval` or `find` are not denied outright; they get the `ESCALATE` decision, which holds the call for a human instead of running it.
 - Shell syntax is large, and constructs the parser does not model can hide a command.
 - The 36-case corpus is small and was not written by an independent red team.
@@ -56,7 +58,7 @@ Read these numbers for what they are. The corpus was written by the same author 
 Node 18 or newer, nothing to install.
 
 ```bash
-npm test                 # 45 tests: shell parser, capability gate, hardening, receipts, view models, page checks
+npm test                 # 56 tests: shell parser, capability gate, hardening, receipts, view models, page checks
 npm run eval             # benchmark table
 npm run eval:check       # fails if CapGate drops below F1 0.98, gains a false positive, or stops beating both baselines
 npm run eval:json        # full report with every row

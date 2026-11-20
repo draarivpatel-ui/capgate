@@ -121,3 +121,123 @@ test('version strings are unified across package, benchmark, SARIF and receipt',
   assert.equal(bench.version, '1.1.0');
   assert.equal(sarif.runs[0].tool.driver.version, '1.1.0');
 });
+
+/* ---------- Wave 2 hardening: fresh cross-model bypass classes ---------- */
+
+test('Windows drive-letter and UNC paths are outside the workspace and hive paths are sensitive', () => {
+  for (const p of ['C:\\Windows\\System32\\config\\SAM', 'C:\\Windows\\Repair\\SAM', '//?/UNC/share/secret']) {
+    assert.equal(ev({ tool: 'fs_read', args: { path: p } }).decision, 'DENY', p);
+  }
+  assert.ok(rules(ev({ tool: 'fs_read', args: { path: 'C:\\Windows\\System32\\config\\SAM' } })).includes('CAP-SECRET-01'));
+  assert.equal(ev({ tool: 'fs_read', args: { path: '/workspace/app/src/main.js' } }).decision, 'ALLOW');
+});
+
+test('space, NBSP and dot-padded traversal segments are blocked', () => {
+  for (const p of ['/workspace/app/..%20/etc/passwd', '/workspace/app/..%c2%a0/etc/passwd', '/workspace/app/.. ./x', '/workspace/app/.../etc/passwd']) {
+    assert.equal(hasTraversalSegment(p), true, p);
+    assert.equal(ev({ tool: 'fs_read', args: { path: p } }).decision, 'DENY', p);
+  }
+  assert.equal(hasTraversalSegment('/workspace/app/v2.0-beta/x'), false);
+});
+
+test('git hook scripts and shell startup files are sensitive paths', () => {
+  for (const p of [
+    '/workspace/app/.git/hooks/pre-commit',
+    '/workspace/app/.git/hooks/post-merge',
+    '/workspace/app/.zshenv',
+    '/workspace/app/.bashrc',
+    '/root/.bash_profile',
+  ]) {
+    assert.ok(rules(ev({ tool: 'fs_write', args: { path: p } })).includes('CAP-SECRET-01'), p);
+  }
+});
+
+test('bare wrapper invocations are never silent allows', () => {
+  assert.ok(rules(ev(sh('env'))).includes('CAP-SECRET-02'));
+  assert.equal(ev(sh('env')).decision, 'DENY');
+  assert.equal(ev(sh('env | grep -i key')).decision, 'DENY');
+  assert.equal(ev(sh('sudo')).decision, 'DENY');
+  assert.ok(rules(ev(sh('sudo'))).includes('CAP-CMD-01'));
+  assert.equal(ev(sh('ls | xargs')).decision, 'ESCALATE');
+});
+
+test('npm lifecycle subcommands that run dependency code escalate', () => {
+  for (const c of ['npm install left-pad', 'npm i evil-pkg', 'npm ci', 'npm create vite@latest', 'npm exec malicious', 'npm update']) {
+    const r = ev(sh(c));
+    assert.ok(rules(r).includes('CAP-CMD-04'), c);
+    assert.notEqual(r.decision, 'ALLOW', c);
+  }
+  assert.equal(ev(sh('npm test')).decision, 'ALLOW');
+  assert.equal(ev(sh('npm start')).decision, 'ALLOW');
+});
+
+test('interpreter module imports and stdin program text are held for review', () => {
+  assert.ok(rules(ev(sh('python3 -m evilpkg'))).includes('CAP-CMD-06'));
+  assert.equal(ev(sh('python3 -m pytest -q')).decision, 'ESCALATE');
+  for (const c of [
+    "python3 - <<EOF\nimport os\nos.system('rm -rf /workspace/app')\nEOF",
+    "python3 <<EOF\nimport subprocess; subprocess.run(['rm','-rf','/workspace/app'])\nEOF",
+    "node <<EOF\nrequire('child_process').execSync('rm -rf /workspace/app')\nEOF",
+    "perl <<EOF\nsystem('rm -rf /workspace/app')\nEOF",
+  ]) {
+    assert.equal(ev(sh(c)).decision, 'DENY', c);
+    assert.ok(rules(ev(sh(c))).some((r) => ['CAP-CMD-05', 'CAP-CMD-01'].includes(r)), c);
+  }
+  assert.ok(rules(ev(sh('sh < /workspace/app/p.sh'))).includes('CAP-CMD-05'));
+  assert.equal(ev(sh('sh < /dev/null')).decision, 'ALLOW');
+  assert.equal(ev(sh('cat < /dev/null')).decision, 'ALLOW');
+});
+
+test('SSRF host lookalikes, zone ids and rebinding services are blocked', () => {
+  const net = { ...DEFAULT_POLICY, allowNetwork: true };
+  const urls = [
+    'http://169。254。169。254/latest/meta-data/',
+    'http://１６９．２５４．１６９．２５４/latest/meta-data/',
+    'http:169.254.169.254/latest/meta-data/',
+    'http://169%2e254%2e169%2e254/',
+    'http://169.254.169.254\u0000/',
+    'http://[::1%25eth0]:8080/',
+    'http://127.0.0.1.nip.io/secret',
+    'http://10-0-0-5.sslip.io/admin',
+    'http://localtest.me/admin',
+    'http://lvh.me/admin',
+    'http://instance-data/computeMetadata/v1/',
+  ];
+  for (const u of urls) {
+    assert.equal(ev({ tool: 'http_fetch', args: { url: u } }, net).decision, 'DENY', u);
+  }
+  assert.equal(ev({ tool: 'http_fetch', args: { url: 'https://api.github.com/repos/x/y' } }, net).decision, 'ALLOW');
+});
+
+test('extended secret environment names (PAT, JWT, KEY suffix) are blocked without new false positives', () => {
+  for (const name of ['GITHUB_PAT', 'JWT', 'SSH_KEY', 'STRIPE_KEY', 'DB_PASS', 'DEPLOY_CREDS', 'SIGNING_KEY']) {
+    assert.equal(ev({ tool: 'env_read', args: { name } }).decision, 'DENY', name);
+  }
+  assert.ok(rules(ev(sh('echo $GITHUB_PAT'))).includes('CAP-SECRET-02'));
+  assert.equal(ev({ tool: 'env_read', args: { name: 'NODE_ENV' } }).decision, 'ALLOW');
+  assert.equal(ev({ tool: 'env_read', args: { name: 'DEPLOY_PATTERN' } }).decision, 'ALLOW');
+  assert.equal(ev({ tool: 'env_read', args: { name: 'PATH_INFO' } }).decision, 'ALLOW');
+});
+
+test('git hook-executing subcommands escalate and core.hooksPath is blocked', () => {
+  for (const c of ['git commit -m x', 'git merge feature', 'git rebase main', 'git pull origin main', 'git am patch.diff']) {
+    assert.ok(rules(ev(sh(c))).includes('CAP-GIT-02'), c);
+    assert.notEqual(ev(sh(c)).decision, 'ALLOW', c);
+  }
+  assert.ok(rules(ev(sh('git config core.hooksPath .githooks'))).includes('CAP-GIT-01'));
+  assert.ok(rules(ev(sh('git config core.hooksPath /tmp/evil'))).includes('CAP-PATH-02'));
+});
+
+test('malformed policy shapes degrade to safe defaults instead of disabling rules', () => {
+  assert.equal(ev(sh('rm -rf /tmp/x'), { ...DEFAULT_POLICY, blockedCommands: 'rm' }).decision, 'DENY');
+  assert.equal(ev(sh('rm -rf /tmp/x'), { ...DEFAULT_POLICY, allowedCommands: null }).decision, 'DENY');
+  assert.equal(ev(sh("bash -c 'bash -c \"rm -rf /tmp/x\"'"), { ...DEFAULT_POLICY, maxShellNestingDepth: 'x' }).decision, 'DENY');
+});
+
+test('xargs brace replacement tokenizes as one word and slash-less special-scheme URLs are inspected', () => {
+  const r = ev(sh("printf 'a' | xargs -I{} sh -c 'rm -rf /workspace/app'"));
+  assert.equal(r.decision, 'DENY');
+  assert.ok(rules(r).includes('CAP-CMD-01'));
+  const net = { ...DEFAULT_POLICY, allowNetwork: true };
+  assert.equal(ev({ tool: 'http_fetch', args: { url: 'http:169.254.169.254/latest/meta-data/' } }, net).decision, 'DENY');
+});

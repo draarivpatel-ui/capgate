@@ -6,6 +6,17 @@
 
 export const SHELL_BINARIES = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
 
+/**
+ * Interpreters that compile and run program text fed on stdin (heredoc, pipe,
+ * or `< file` redirect) or named by `-`. Like `bash -s`, an interpreter with
+ * no script argument reads its program from stdin. (The awk family and java
+ * read *data* from stdin, so they are deliberately absent.)
+ */
+export const STDIN_INTERPRETERS = new Set([
+  'python', 'python2', 'python3', 'node', 'ruby', 'perl', 'php', 'lua', 'Rscript',
+  'deno', 'bun', 'jshell', 'ghci', 'fish', 'yash', 'osh', 'oil', 'elvish',
+]);
+
 export const WRAPPER_VALUE_FLAGS = new Map([
   ['env', new Set(['-u', '--unset', '-C', '--chdir'])],
   ['timeout', new Set(['-k', '--kill-after', '-s', '--signal'])],
@@ -267,6 +278,16 @@ export function tokenizeShellLines(script) {
       continue;
     }
 
+    // `{` and `}` are reserved words, not operators: they only group when they
+    // start a word. Mid-word braces are literal (`xargs -I{}`), so treating
+    // them as operators here would silently split the word apart.
+    if ((ch === '{' || ch === '}') && (hasToken || current !== '')) {
+      hasToken = true;
+      current += ch;
+      i += 1;
+      continue;
+    }
+
     if (ch === '|' || ch === ';' || ch === '&' || ch === '(' || ch === ')' || ch === '{' || ch === '}' || ch === '<' || ch === '>') {
       flush();
       tokens.push({ type: 'op', raw: ch, value: ch });
@@ -472,7 +493,7 @@ function isAssignmentWord(raw) {
  * Unwrap wrapper prefixes (`env`, `timeout`, `xargs`, `nohup`, etc.) and extract
  * inner command + shell `-c` script payload if present.
  */
-function unwrapSegmentWords(words) {
+function unwrapSegmentWords(words, segTokens) {
   let idx = 0;
   const chain = [];
   const extraScripts = [];
@@ -489,6 +510,7 @@ function unwrapSegmentWords(words) {
 
     const valFlags = WRAPPER_VALUE_FLAGS.get(cmd) || new Set();
     let sawTimeFormat = false;
+    let sawScriptFile = false;
     while (idx < words.length) {
       const w = words[idx];
       if (cmd === 'env' && isAssignmentWord(w)) {
@@ -542,13 +564,32 @@ function unwrapSegmentWords(words) {
 
   const remaining = words.slice(idx);
   if (remaining.length === 0) {
-    return { chain, command: null, args: [], nestedScript: null, readsStdinAsCode: false, extraScripts };
+    // A wrapper that consumed the whole line is not a no-op: bare `env` dumps
+    // every environment variable, bare `xargs` re-runs buffered stdin as a
+    // command, bare `sudo` is still sudo. Surface a marker so the gate can
+    // rule on it instead of silently allowing.
+    const bareCmd = chain.length > 0 ? chain[chain.length - 1] : null;
+    return { chain, command: bareCmd ? `__bare_${bareCmd}__` : null, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
   }
 
   const command = baseCommandName(remaining[0]);
   const args = remaining.slice(1);
   let nestedScript = null;
   let readsStdinAsCode = false;
+  let stdinRedirectTarget = null;
+  let scriptFile = null;
+
+  // A `< file` redirect feeding program text to a shell or interpreter makes
+  // that file the executed program regardless of other arguments.
+  if (segTokens) {
+    for (let j = 0; j < segTokens.length - 1; j++) {
+      const t = segTokens[j];
+      if (t.type === 'op' && t.value === '<' && segTokens[j + 1]?.type === 'word') {
+        stdinRedirectTarget = segTokens[j + 1].value || null;
+        break;
+      }
+    }
+  }
 
   if (SHELL_BINARIES.has(command)) {
     let seenDashC = false;
@@ -589,15 +630,33 @@ function unwrapSegmentWords(words) {
       }
       if (!seenDashC) {
         seenScriptFile = true;
+        scriptFile = opt;
         break;
       }
     }
     if (!seenDashC && !seenScriptFile) {
       readsStdinAsCode = true;
     }
+  } else if (STDIN_INTERPRETERS.has(command)) {
+    // An interpreter consumes program text from stdin when it has no script
+    // file argument: `python3 -`, `python3 <<EOF`, `cat x | python3`,
+    // `python3 < script.py`. Flags and options never consume stdin.
+    let sawScriptFile = false;
+    for (let j = 0; j < args.length; j++) {
+      const opt = args[j];
+      if (opt === '-') {
+        readsStdinAsCode = true;
+        break;
+      }
+      if (opt.startsWith('-')) continue;
+      sawScriptFile = true;
+      scriptFile = opt;
+      break;
+    }
+    if (!sawScriptFile) readsStdinAsCode = true;
   }
 
-  return { chain, command, args, nestedScript, readsStdinAsCode, extraScripts };
+  return { chain, command, args, nestedScript, readsStdinAsCode, stdinRedirectTarget, scriptFile, extraScripts };
 }
 
 /**
@@ -628,7 +687,7 @@ export function analyzeShellAst(script, maxDepth = 6) {
       const words = seg.tokens.filter((t) => t.type === 'word').map((t) => t.value);
       if (words.length === 0) continue;
 
-      const parsed = unwrapSegmentWords(words);
+      const parsed = unwrapSegmentWords(words, seg.tokens);
       if (!parsed.command && parsed.extraScripts.length === 0) continue;
 
       const fullTrail = parsed.command
@@ -672,7 +731,7 @@ export function analyzeShellAst(script, maxDepth = 6) {
         } else {
           const prevSeg = segments[sIdx - 1];
           const prevWords = prevSeg.tokens.filter((t) => t.type === 'word').map((t) => t.value);
-          const prevParsed = unwrapSegmentWords(prevWords);
+          const prevParsed = unwrapSegmentWords(prevWords, prevSeg.tokens);
           const feederCmd = prevParsed.command || prevWords[0] || '';
           if (feederCmd === 'echo' || feederCmd === 'printf') {
             const hasEchoEsc = feederCmd === 'echo' && prevParsed.args.some((a) => /^-[neE]*e/.test(a));
@@ -704,6 +763,25 @@ export function analyzeShellAst(script, maxDepth = 6) {
         for (const hd of heredocBodies) {
           heredocScripts.push(hd.body);
           walk(hd.body, depth + 1, [...fullTrail, `heredoc(${hd.delim})`]);
+        }
+      }
+
+      // A `< file` redirect feeding program text to a shell or interpreter:
+      // surface the redirect target as a pseudo-record so the gate can inspect
+      // the file being executed (e.g. `sh < /workspace/app/payload.sh`).
+      if (parsed.stdinRedirectTarget && parsed.stdinRedirectTarget !== '/dev/null') {
+        records.push({
+          depth,
+          trail: [...fullTrail, `<${parsed.stdinRedirectTarget}`],
+          command: '__stdin_redirect__',
+          args: [parsed.stdinRedirectTarget],
+          rawWords: words,
+        });
+        if (!parsed.readsStdinAsCode) {
+          // Non-stdin consumers (`cat < f`) still get path inspection from the
+          // record args; nothing more to do here.
+        } else if (parsed.command && !parsed.command.startsWith('__')) {
+          // Stdin-code consumers execute the file as a program: hold for review.
         }
       }
     }

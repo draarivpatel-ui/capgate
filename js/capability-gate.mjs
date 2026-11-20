@@ -4,7 +4,9 @@
  * Pure ES module (zero external dependencies).
  */
 
-import { analyzeShellAst, SHELL_BINARIES } from './shell-ast.mjs';
+import { analyzeShellAst, SHELL_BINARIES, STDIN_INTERPRETERS } from './shell-ast.mjs';
+
+const STDIN_INTERPRETERS_SET = STDIN_INTERPRETERS;
 
 export const DEFAULT_POLICY = Object.freeze({
   workspaceRoot: '/workspace/app',
@@ -37,9 +39,18 @@ const SENSITIVE_PATH_PATTERNS = [
   /^\/var\/run\/secrets(\/|$)/i,
   /(^|\/)secrets?\//i,
   /(^|\/)\.git-credentials/i,
+  /(^|\/)\.git\/hooks\//i,
+  /(^|\/)\.gitattributes$/i,
+  /windows\/system32\/config\/(sam|system|software|security)/i,
+  /windows\/repair\//i,
+  /windows\/system32\/drivers\/etc\//i,
+  /(^|\/)ntds\.dit$/i,
+  // Shell startup files execute on every login or interactive shell: writing
+  // one is persistent code execution, reading one leaks configuration.
+  /(^|\/)\.(zshenv|zprofile|zshrc|bashrc|bash_profile|bash_login|profile|gitconfig|condarc|wgetrc|curlrc|inputrc|editrc|tmux\.conf)$/i,
 ];
 
-const SECRET_ENV_NAMES = /(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|DATABASE_URL|DSN|CREDENTIAL|AUTH)/i;
+const SECRET_ENV_NAMES = /(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|DATABASE_URL|DSN|CREDENTIAL|AUTH|(?:^|_)(?:KEY|PAT|PASS|CREDS|JWT|PASSPHRASE|SIGNING)(?:$|_))/i;
 
 /**
  * Recover the ASCII character hidden in an overlong UTF-8 byte sequence.
@@ -146,7 +157,9 @@ export function hasTraversalSegment(rawPath) {
   const clean = normalizeForInspection(rawPath);
   if (!clean) return false;
   // A literal `..` segment anywhere, including trailing (`a/..`) and leading (`../a`).
-  return clean.split('/').some((p) => p === '..');
+  // Padded forms (`.. `, `..`, `.. .`) also count: filesystems strip trailing
+  // spaces and dots from path segments, so they resolve as parent traversal.
+  return clean.split('/').some((p) => p === '..' || /^\.+[\s.]*$/.test(p));
 }
 
 /**
@@ -167,6 +180,10 @@ export function isWithinWorkspace(rawPath, workspaceRoot) {
   const clean = normalizeForInspection(rawPath).trim();
   if (!clean) return true;
   if (hasTraversalSegment(clean)) return false;
+  // A Windows drive letter or UNC device path is always absolute and never
+  // inside a POSIX workspace root (`C:\Windows\...` folds to `c:/windows/...`,
+  // which a naive relative-path check would wrongly treat as relative).
+  if (/^[a-z]:\//.test(clean) || clean.startsWith('//')) return false;
   if (!clean.startsWith('/')) return true;
   const root = String(workspaceRoot || '').replace(/\\/g, '/').replace(/\/+$/, '');
   if (!root) return true;
@@ -209,8 +226,35 @@ function intToOctets(val) {
   return [(val >>> 24) & 255, (val >>> 16) & 255, (val >>> 8) & 255, val & 255];
 }
 
+/**
+ * Normalize a URL host for IP/internal checks. Defeats the IDNA and URL-parser
+ * lookalikes: ideographic (U+3002), fullwidth (U+FF0E) and halfwidth (U+FF61)
+ * dots that WHATWG URL parsing treats as `.`; fullwidth digits that IDNA maps
+ * to ASCII; percent-encoded bytes in the host; NUL/control suffixes; and IPv6
+ * zone-id suffixes (`::1%25eth0`).
+ */
+export function normalizeHostForInspection(hostInput) {
+  let host = String(hostInput ?? '');
+  // Control and zero-width characters have no role in a resolvable hostname.
+  host = host.replace(/[\u0000-\u001f\u007f-\u009f​‌‍⁠﻿]/g, '');
+  // Strip the IPv6 zone-id (%eth0 or percent-encoded %25eth0).
+  if (host.includes('[')) {
+    host = host.replace(/%[0-9a-zA-Z~.\-]+(?=\]$)/, '');
+  }
+  // Percent-decode leniently (hosts may carry %2e dots).
+  host = host.replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(Number.parseInt(h, 16)));
+  // NFKC folds fullwidth digits (１６９ -> 169); explicit map for the three
+  // non-ASCII dot characters a URL parser accepts inside a host.
+  host = host.normalize('NFKC').replace(/[。．｡]/g, '.').replace(/[⁄∕]/g, '/');
+  host = host.trim().toLowerCase();
+  return host;
+}
+
+/** Internal-only names: cloud metadata hosts and wildcard-DNS loopback services. */
+const INTERNAL_HOST_NAMES = /(?:^|\.)(?:nip\.io|sslip\.io|localtest\.me|lvh\.me|traefik\.me|vcap\.me|fip\.io)$|^(?:instance-data|metadata)$/i;
+
 export function isPrivateOrInternalHost(hostInput) {
-  let host = String(hostInput || '').trim().toLowerCase();
+  let host = normalizeHostForInspection(hostInput);
   if (!host) return false;
   if (host.includes('@')) host = host.slice(host.lastIndexOf('@') + 1);
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
@@ -218,6 +262,12 @@ export function isPrivateOrInternalHost(hostInput) {
   if (!host) return false;
 
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
+    return true;
+  }
+  // Wildcard-DNS rebinding services resolve subdomains to loopback/RFC1918
+  // addresses (127.0.0.1.nip.io, 10-0-0-5.sslip.io), and bare cloud metadata
+  // names are internal by construction.
+  if (INTERNAL_HOST_NAMES.test(host)) {
     return true;
   }
 
@@ -269,7 +319,9 @@ function isPrivateIpv4Octets([a, b]) {
 
 export function extractUrlsAndHosts(text) {
   const hosts = [];
-  const urlRe = /https?:\/\/([^\s/?#"']+)/gi;
+  // WHATWG URL parsing accepts `http:host/path` and `http:/host/path` for
+  // special schemes, so the optional slashes are part of the attack surface.
+  const urlRe = /https?:\/{0,2}([^\s/?#"']+)/gi;
   for (const m of String(text || '').matchAll(urlRe)) {
     let auth = m[1];
     const atIdx = auth.lastIndexOf('@');
@@ -281,20 +333,46 @@ export function extractUrlsAndHosts(text) {
     } else {
       host = auth.replace(/:\d+$/, '');
     }
-    hosts.push({ url: m[0], host });
+    // Normalization may fold a fullwidth solidus into a real `/`; the host
+    // ends there. Also catch a raw `／` inside the captured authority.
+    host = host.split('/')[0];
+    hosts.push({ url: m[0], host: normalizeHostForInspection(host) });
   }
   return hosts;
+}
+
+/**
+ * Sanitize a caller-supplied policy so a malformed value degrades to the safe
+ * default instead of silently disabling a rule (a string where an array belongs
+ * would otherwise become a character set, and a non-numeric depth would break
+ * nesting checks).
+ */
+function sanitizePolicy(merged) {
+  const asStringArray = (v, fallback) => {
+    if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
+    if (typeof v === 'string' && v.trim()) return [v.trim()];
+    return fallback;
+  };
+  const depth = Number(merged.maxShellNestingDepth);
+  return {
+    ...merged,
+    allowedCommands: asStringArray(merged.allowedCommands, DEFAULT_POLICY.allowedCommands),
+    blockedCommands: asStringArray(merged.blockedCommands, DEFAULT_POLICY.blockedCommands),
+    networkCommands: asStringArray(merged.networkCommands, DEFAULT_POLICY.networkCommands),
+    allowedDomains: asStringArray(merged.allowedDomains, DEFAULT_POLICY.allowedDomains),
+    maxShellNestingDepth: Number.isFinite(depth) && depth >= 0 ? Math.min(depth, 12) : DEFAULT_POLICY.maxShellNestingDepth,
+  };
 }
 
 /**
  * Evaluate a single agent tool-call trace against a capability policy.
  */
 export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
-  const policy = { ...DEFAULT_POLICY, ...policyInput };
-  const allowedSet = new Set(policy.allowedCommands || []);
-  const blockedSet = new Set(policy.blockedCommands || []);
-  const netCmdSet = new Set(policy.networkCommands || []);
-  const allowedDomains = new Set((policy.allowedDomains || []).map((d) => d.toLowerCase()));
+  const policy = sanitizePolicy({ ...DEFAULT_POLICY, ...policyInput });
+  const allowedSet = new Set(policy.allowedCommands);
+  const blockedSet = new Set(policy.blockedCommands);
+  const netCmdSet = new Set(policy.networkCommands);
+  const allowedDomains = new Set(policy.allowedDomains.map((d) => d.toLowerCase()));
 
   const findings = [];
   let ast = { records: [], heredocScripts: [], maxObservedDepth: 0 };
@@ -400,6 +478,55 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
           rec.trail, 'Inspect or replace piped shell execution with an explicit static script or allowlisted command.');
         continue;
       }
+      // Program text fed to an interpreter through stdin (heredoc body, piped
+      // echo/printf, `< file`): the payload is Python/Node/Ruby code, not
+      // shell, so flag the channel itself for human review regardless of what
+      // the shell-approximation of the payload parsed into. Shell consumers
+      // are excluded: their payload really is shell, so the walked records
+      // below give precise per-command findings instead.
+      const stdinChannel = rec.trail.findIndex((t) => /^(heredoc\(|pipe-|herestring|<)/.test(t));
+      if (stdinChannel >= 0) {
+        const consumer = rec.trail[stdinChannel - 1] || '';
+        if (STDIN_INTERPRETERS_SET.has(consumer)) {
+          addFinding('CAP-CMD-05', 'high', `Program text fed to "${consumer}" through stdin`,
+            `A heredoc or pipe supplies the program for "${consumer}" at [${rec.trail.slice(0, stdinChannel + 1).join(' -> ')}]; stdin code bypasses argument inspection.`,
+            rec.trail.slice(0, stdinChannel + 1), 'Run an explicit script file that is itself reviewed, or pipe data (not code) into the interpreter.');
+          continue;
+        }
+      }
+      if (rec.command === '__stdin_redirect__') {
+        const target = rec.args[0] || '';
+        const sensitive = isSensitivePath(target) || hasTraversalSegment(target);
+        addFinding('CAP-CMD-05', sensitive ? 'critical' : 'high',
+          `Redirected stdin script execution via "< ${target}"`,
+          `A shell or interpreter consumes program text from "< ${target}" at [${rec.trail.slice(0, -1).join(' -> ')}].`,
+          rec.trail, 'Inspect the script content, or run an explicit allowlisted command instead of redirecting code into an interpreter.');
+        continue;
+      }
+      // Bare wrapper (`env`, `xargs`, `sudo`, `timeout`, ... consuming the
+      // whole line): still a real command with real side effects.
+      const bareMatch = /^__bare_(.+?)__$/.exec(rec.command);
+      if (bareMatch) {
+        const bare = bareMatch[1];
+        if (bare === 'env') {
+          addFinding('CAP-SECRET-02', 'critical', 'Bare "env" dumps the process environment',
+            'A bare env call prints every environment variable, including secrets the policy never meant to expose.',
+            rec.trail, 'Name the variables you need instead of dumping the environment.');
+        } else if (blockedSet.has(bare)) {
+          addFinding('CAP-CMD-01', 'critical', `Blocked command "${bare}" with no arguments`,
+            `A bare "${bare}" invocation at [${rec.trail.join(' -> ')}] is still the blocked command.`,
+            rec.trail, `Remove "${bare}" or request explicit human elevation.`);
+        } else if (!allowedSet.has(bare) && !SHELL_BINARIES.has(bare)) {
+          addFinding('CAP-CMD-02', 'medium', `Unlisted wrapper command "${bare}" with no target`,
+            `A bare "${bare}" invocation consumes buffered input or mutates state outside the allowlist.`,
+            rec.trail, `Either add "${bare}" to allowedCommands or replace it with an explicit allowlisted command.`);
+        } else {
+          addFinding('CAP-CMD-02', 'medium', `Bare "${bare}" wrapper with no target command`,
+            `A bare "${bare}" call has no inspectable payload, so the firewall cannot verify what it would run.`,
+            rec.trail, 'Run an explicit allowlisted command instead of a bare wrapper invocation.');
+        }
+        continue;
+      }
 
       // Secret assignments passed to wrapper binaries (env -i, env FOO=,
       // timeout, command) are consumed by the unwrapper and never reach arg
@@ -500,6 +627,15 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
         }
       }
 
+      // Module-import execution (`python3 -m pkg`, `perl -MEvil`): importing an
+      // unvetted module runs its top-level code. Escalate for human review.
+      const modImport = extractModuleImport(rec);
+      if (modImport && !policy.allowInlineCode) {
+        addFinding('CAP-CMD-06', 'medium', `Module import execution in "${rec.command}"`,
+          `${rec.command} -m imports and runs module code that is not in the policy (${modImport.module || 'unnamed'}).`,
+          rec.trail, 'Import only audited modules, or add the specific module to an explicit allowlist.');
+      }
+
       // Special check: git push / send-pack / dangerous git config manipulation
       if (rec.command === 'git') {
         const { subcommand, rest } = findGitSubcommand(rec.args);
@@ -511,6 +647,12 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
           addFinding('CAP-GIT-01', 'high', 'Git execution hook/alias configuration requires human review',
             `git config modification detected in [${rec.trail.join(' -> ')}].`,
             rec.trail, 'Do not mutate executable git hooks, aliases, pagers, or credential helpers dynamically.');
+        } else if (subcommand && GIT_HOOK_SUBCOMMANDS.has(subcommand) && subcommand !== 'worktree') {
+          // commit/merge/rebase/pull/am all execute repo hooks and can run
+          // attacker-controlled code if hooks were tampered with.
+          addFinding('CAP-GIT-02', 'medium', `git ${subcommand} executes repository hooks`,
+            `git ${subcommand} runs commit/merge hooks that may execute arbitrary repo code.`,
+            rec.trail, 'Run hook-executing git subcommands only after the hook scripts are reviewed.');
         }
 
         // `git -c key=value ...` (and `-c=key=value`, `--config-env=key=VAR`)
@@ -584,7 +726,10 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
 const GIT_GLOBAL_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env']);
 
 /** Keys whose git config value can execute code or redirect a hook. */
-const GIT_DANGEROUS_CONFIG_KEYS = /^(?:alias\.|core\.(?:sshcommand|fsmonitor|pager|editor|askpass|excludesfile|attributesfile)|credential\.|pager\.|diff\.external|textconv\.|filter\.|merge\.driver|sendemail\.)/i;
+const GIT_DANGEROUS_CONFIG_KEYS = /^(?:alias\.|core\.(?:sshcommand|fsmonitor|pager|editor|askpass|excludesfile|attributesfile|hooksPath|hooksdir)|credential\.|pager\.|diff\.external|textconv\.|filter\.|merge\.driver|sendemail\.)/i;
+
+/** Git subcommands that execute hooks, merge machinery, or patch scripts. */
+const GIT_HOOK_SUBCOMMANDS = new Set(['commit', 'merge', 'rebase', 'pull', 'am', 'rebase--interactive', 'filter-branch', 'worktree']);
 
 /**
  * Interpreters that can run arbitrary inline code from a flag argument.
@@ -596,14 +741,26 @@ const INLINE_INTERPRETERS = new Map([
   ['python', ['-c', '--command']],
   ['python3', ['-c', '--command']],
   ['node', ['-e', '--eval', '-p', '--print']],
-  ['ruby', ['-e', '-r']],
+  ['ruby', ['-e']],
   ['perl', ['-e', '-E']],
   ['php', ['-r', '-f']],
-  ['lua', ['-e', '-l']],
+  ['lua', ['-e']],
   ['Rscript', ['-e']],
   ['deno', ['eval', 'run']],
   ['bun', ['-e', 'run']],
 ]);
+
+/** Module-import flags: the argument names a module whose import executes code. */
+const MODULE_IMPORT_FLAGS = new Map([
+  ['python', ['-m']],
+  ['python3', ['-m']],
+  ['perl', ['-M']],
+  ['ruby', ['-r']],
+  ['lua', ['-l']],
+]);
+
+/** npm subcommands that run dependency or package-defined code. */
+const NPM_CODE_SUBCOMMANDS = new Set(['install', 'i', 'add', 'ci', 'create', 'init', 'exec', 'x', 'link', 'rebuild', 'update']);
 
 /**
  * If a command is an interpreter carrying inline code (or an `npm run`/`npx`
@@ -623,6 +780,13 @@ function extractInlineCode(rec) {
       const scriptName = args[runIdx + 1] || '';
       if (['test', 'start'].includes(scriptName)) return null;
       return { kind: 'npm-script', code: `package script: ${scriptName || 'default'}`, command: cmd };
+    }
+    // `npm install`, `npm ci`, `npm create`, `npm exec`, ... run dependency
+    // lifecycle scripts: the standard supply-chain code-execution vector.
+    const subIdx = args.findIndex((a) => !a.startsWith('-'));
+    if (subIdx >= 0 && NPM_CODE_SUBCOMMANDS.has(args[subIdx])) {
+      const target = args[subIdx + 1] || 'dependencies';
+      return { kind: 'npm-script', code: `lifecycle scripts for ${target}`, command: cmd };
     }
     if (cmd === 'npx' || cmd === 'pnpm' || cmd === 'yarn') {
       const firstNonFlag = args.find((a) => !a.startsWith('-'));
@@ -645,6 +809,28 @@ function extractInlineCode(rec) {
     for (const f of flags) {
       if (f.startsWith('-') && !f.startsWith('--') && a.startsWith(f) && a.length > f.length) {
         return { kind: 'inline', code: a.slice(f.length), command: cmd };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Module-import execution (`python3 -m pkg`, `perl -MEvil`, `ruby -revil`).
+ * Importing a module runs its top-level code, so an unvetted module name is an
+ * escalation, never a silent allow.
+ */
+function extractModuleImport(rec) {
+  const cmd = rec?.command;
+  const flags = MODULE_IMPORT_FLAGS.get(cmd);
+  if (!flags) return null;
+  const args = rec.args || [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (flags.includes(a)) return { module: args[i + 1] || '', command: cmd };
+    for (const f of flags) {
+      if (f.startsWith('-') && !f.startsWith('--') && a.startsWith(f) && a.length > f.length) {
+        return { module: a.slice(f.length), command: cmd };
       }
     }
   }
