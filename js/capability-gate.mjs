@@ -41,9 +41,24 @@ const SENSITIVE_PATH_PATTERNS = [
   /^\/var\/run\/secrets(\/|$)/i,
   /(^|\/)secrets?\//i,
   // Filenames that name a secret or env dump without a standard extension:
-  // `secret.txt`, `my-secret-file.txt`, `environment`, `env.list`. The word
-  // boundary keeps `secretary.txt` and `environmental-notes.md` out.
-  /(^|\/)[^/]*\bsecret\b[^/]*$/i,
+  // `secret.txt`, `my-secret-file.txt`, `secrets.yaml`, `mysecret.txt`,
+  // `topsecret.env`. `secretar*` (`secretary.txt`, `secretariat.md`) stays out.
+  /(^|\/)[^/]*secret(?!ar)[^/]*$/i,
+  // Basenames ending in `.env` (`prod.env`, `app.env`) or starting a `.env.*`
+  // chain are env-file secrets; the `.env`-dotfile rules above only cover
+  // dot-prefixed names.
+  /(^|\/)[^/]*\.env(?:\.[\w.-]*)?$/i,
+  // Credential/token/secrets suffixes and the usual cloud/DB client stores:
+  // `x.credentials`, `x.token`, `.pgpass`, `.my.cnf`, `.boto`, `.s3cfg`,
+  // `.dockercfg`, `.azure/*`, gh CLI hosts.yml, wallet.dat, mail archives.
+  /(^|\/)[^/]*credentials?[^/]*$/i,
+  /(^|\/)[^/]*\.(?:token|secrets?)$/i,
+  /(^|\/)\.(?:pgpass|my\.cnf|pg_service\.conf|s3cfg|boto|dockercfg)$/i,
+  /(^|\/)\.azure\//i,
+  /(^|\/)(?:\.config\/)?gh\/hosts\.yml$/i,
+  /(^|\/)[^/]*\.pst$/i,
+  /(^|\/)wallet\.dat$/i,
+  /(^|\/)database\.(?:yml|yaml|json)$/i,
   // `env`-family filenames with a suffix (`env.list`, `environment`,
   // `.envrc`-style). A bare `env` word is the wrapper command itself and must
   // not match, so the suffix is required.
@@ -79,6 +94,7 @@ const SAFE_BUILTINS = new Set([
   'continue', 'times', 'caller', 'suspend', 'logout', 'set', 'unset',
   'read', 'mapfile', 'readarray', 'shopt', 'compopt', 'unalias', 'disable',
   'help', 'hash', 'enable', 'alias', 'fc', 'bind', 'complete', 'compgen',
+  'command', 'builtin',
 ]);
 
 /**
@@ -96,7 +112,7 @@ const BUILTIN_EXEC_ARG_CHECKS = new Set([
  * via addFinding; benign forms (`trap -p`, `bind -p`, `complete -p`,
  * `enable -n`, `hash -r`, `fc -l`, `alias ll="ls -la"`) produce nothing.
  */
-function checkBuiltinExecArgs(rec, addFinding, { blockedSet, allowedSet }) {
+function checkBuiltinExecArgs(rec, addFinding, { blockedSet, allowedSet, netCmdSet, policy }) {
   const cmd = rec.command;
   const args = rec.args || [];
   const trail = rec.trail;
@@ -112,13 +128,62 @@ function checkBuiltinExecArgs(rec, addFinding, { blockedSet, allowedSet }) {
     return null;
   };
 
+  /**
+   * Full policy scan of a command string (trap action, remote helper
+   * payload): blocked commands, network egress, and sensitive or
+   * outside-workspace paths inside it are all deferred execution the
+   * argument scans never see. Returns the worst reason found, or a medium
+   * marker when the payload is a command at all.
+   */
+  const deepScanPayload = (text) => {
+    if (!text) return null;
+    const subs = analyzeShellAst(String(text), 3).records;
+    let worst = null;
+    for (const r of subs) {
+      if (r.command === '__max_depth_exceeded__' || r.command === '__pipe_stdin_shell__') {
+        return { sev: 'high', why: 'nested shell channel' };
+      }
+      const b = (r.trail || []).find((c) => blockedSet.has(c)) ||
+        (blockedSet.has(r.command) ? r.command : null);
+      if (b) return { sev: 'critical', why: `blocked command "${b}"` };
+      if (netCmdSet && netCmdSet.has(r.command)) return { sev: 'high', why: `network command "${r.command}"` };
+      for (const w of [...(r.args || []), ...(r.rawWords || []), ...(r.redirectTargets || [])]) {
+        for (const c of pathLikeCandidates(w)) {
+          if (isSensitivePath(c)) return { sev: 'high', why: `sensitive path "${c.slice(0, 40)}"` };
+          if ((hasTraversalSegment(c) || !isWithinWorkspace(c, policy.workspaceRoot)) &&
+              !c.startsWith('-') && !c.startsWith('/dev/null')) {
+            return { sev: 'high', why: `outside-workspace path "${c.slice(0, 40)}"` };
+          }
+        }
+      }
+      if (!worst) worst = { sev: 'medium', why: `deferred command "${r.command}"` };
+    }
+    return worst;
+  };
+
   if (cmd === 'trap') {
     // `trap ACTION [CONDITION...]`; `trap -p`/`trap -l` are queries.
     if (args.some((a) => a === '-p' || a === '-l' || a === '--print' || a === '--list')) return;
     const action = args.find((a) => !a.startsWith('-'));
     if (!action) return;
+    // `trap EXIT`/`trap 0` with no action resets the handler; a lone signal
+    // name is not code.
+    if (/^(?:[A-Za-z][A-Za-z0-9]*|\d+)$/.test(action) && args.filter((a) => !a.startsWith('-')).length === 1) return;
     const hit = argRunsBlocked(action);
-    if (hit || SHELL_META_RE.test(action)) {
+    if (hit) {
+      addFinding('CAP-CMD-09', 'critical', `trap action runs blocked command "${hit}"`,
+        `trap action "${String(action).slice(0, 60)}" at [${trail.join(' -> ')}] executes on a shell signal.`,
+        trail, 'Remove command-bearing trap actions; traps should only record state.');
+      return;
+    }
+    const deep = deepScanPayload(action);
+    if (deep) {
+      addFinding('CAP-CMD-09', deep.sev, `trap action embeds executable code in ${rec.command}`,
+        `trap action "${String(action).slice(0, 60)}" at [${trail.join(' -> ')}] runs ${deep.why} on a shell signal.`,
+        trail, 'Remove command-bearing trap actions; traps should only record state.');
+      return;
+    }
+    if (SHELL_META_RE.test(action)) {
       addFinding('CAP-CMD-09', 'high', `trap action embeds executable code in ${rec.command}`,
         `trap action "${String(action).slice(0, 60)}" at [${trail.join(' -> ')}] runs on a shell signal.`,
         trail, 'Remove command-bearing trap actions; traps should only record state.');
@@ -262,8 +327,9 @@ function checkSedArgs(rec, addFinding) {
   }
 
   for (const script of scriptTexts) {
-    // `e` command: `[addr]e [command]` executes text through the shell.
-    if (/(?:^|[;{},\n]|\d)\s*e(?:\s|$)/.test(script)) {
+    // `e` command: `[addr]e [command]` executes text through the shell. `$e`
+    // (last-line address) and `!e` (negated address) run it too.
+    if (/(?:^|[;{},\n$!]|\d)\s*e(?:\s|$)/.test(script)) {
       addFinding('CAP-CMD-11', 'high', `sed script contains "e" command executing shell text`,
         `sed script "${script.slice(0, 60)}" at [${trail.join(' -> ')}] runs commands through the shell.`,
         trail, 'Remove e commands from sed scripts; they are arbitrary command execution.');
@@ -281,11 +347,11 @@ function checkSedArgs(rec, addFinding) {
         return;
       }
     }
-    // `r file` / `w file` commands read or write paths invisible to the
-    // argument-level path scan when they sit inside the script string.
-    const rw = /(?:^|[;{},\n]|\d|\s)[rw]\s+(\/|~|\$)/.exec(script);
+    // `r file` / `w file` (and GNU `R`/`W`) commands read or write paths
+    // invisible to the argument-level path scan inside the script string.
+    const rw = /(?:^|[;{},\n]|\d|\s)[rRwW]\s+(\/|~|\$)/.exec(script);
     if (rw) {
-      addFinding('CAP-PATH-02', 'high', `sed script ${rw[0].trim().startsWith('w') ? 'writes' : 'reads'} an outside path`,
+      addFinding('CAP-PATH-02', 'high', `sed script ${/w/i.test(rw[0].trim()) ? 'writes' : 'reads'} an outside path`,
         `sed script "${script.slice(0, 60)}" at [${trail.join(' -> ')}] references a path outside the workspace.`,
         trail, 'Keep sed r/w targets inside the workspace.');
       return;
@@ -299,14 +365,14 @@ function checkSedArgs(rec, addFinding) {
  * resolvers, and config-file redirects. Assigning one is an execution channel,
  * not a benign knob.
  */
-const EXEC_CHANNEL_ENV = /^(?:BASH_ENV|ENV|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|LD_PROFILE|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FALLBACK_LIBRARY_PATH|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|LUA_PATH|LUA_CPATH|PHP_INI_SCAN_DIR|GIT_SSH_COMMAND|GIT_SSH|GIT_ASKPASS|GIT_ASK_YESNO|SSH_ASKPASS|SUDO_ASKPASS|GIT_EXEC_PATH|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_TEMPLATE_DIR|GIT_PROXY_COMMAND|HOSTALIASES|RESOLV_HOST_CONF|NLSPATH|LOCPATH|GCONV_PATH|TEXTDOMAINDIR|INPUTRC|LESSOPEN|LESSCLOSE|WGETRC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|CLASSPATH|GOFLAGS|PROMPT_COMMAND|NPM_CONFIG_SCRIPT_SHELL|npm_config_script_shell|BASH_FUNC_[A-Za-z0-9_]+|NSS_WRAPPER_[A-Za-z0-9_]+|GIT_CONFIG_(?:COUNT|KEY_[0-9]+|VALUE_[0-9]+)|PYTHONEXECUTABLE|PYTHONNOUSERSITE|PYTHONSAFEPATH|NODE_REPL_EXTERNAL_MODULE|PERL_MM_OPT)$/i;
+const EXEC_CHANNEL_ENV = /^(?:BASH_ENV|ENV|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|LD_PROFILE|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FALLBACK_LIBRARY_PATH|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|LUA_PATH|LUA_CPATH|PHP_INI_SCAN_DIR|GIT_SSH_COMMAND|GIT_SSH|GIT_ASKPASS|GIT_ASK_YESNO|SSH_ASKPASS|SUDO_ASKPASS|GIT_EXEC_PATH|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_PARAMETERS|GIT_EXTERNAL_DIFF|GIT_TEMPLATE_DIR|GIT_PROXY_COMMAND|HOSTALIASES|RESOLV_HOST_CONF|NLSPATH|LOCPATH|GCONV_PATH|TEXTDOMAINDIR|INPUTRC|LESSOPEN|LESSCLOSE|WGETRC|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|CLASSPATH|GOFLAGS|PROMPT_COMMAND|NPM_CONFIG_SCRIPT_SHELL|npm_config_script_shell|BASH_FUNC_[A-Za-z0-9_]+|NSS_WRAPPER_[A-Za-z0-9_]+|GIT_CONFIG_(?:COUNT|KEY_[0-9]+|VALUE_[0-9]+)|PYTHONEXECUTABLE|PYTHONNOUSERSITE|PYTHONSAFEPATH|NODE_REPL_EXTERNAL_MODULE|PERL_MM_OPT|ZDOTDIR|FPATH|PYTEST_PLUGINS|PYTEST_ADDOPTS|OPENSSL_CONF)$/i;
 
 /**
  * Environment variables that redirect resolution, config, credentials, or
  * network egress without directly executing code. Held for review rather than
  * denied outright because some (proxies, HOME) appear in legitimate setups.
  */
-const REDIRECT_ENV = /^(?:PATH|HOME|TMPDIR|TMP|TEMP|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CONFIG_DIRS|XDG_DATA_DIRS|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR|IFS|CDPATH|GLOBIGNORE|FIGNORE|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|GIT_SSL_NO_VERIFY|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|SOCKS_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|socks_proxy|no_proxy|NO_PROXY|NPM_CONFIG_[A-Za-z0-9_]+|npm_config_[a-z0-9_]+|GIT_DIR|GIT_WORK_TREE|GIT_NAMESPACE|GIT_TRACE|GIT_TRACE_PACKET|GIT_TRACE_SETUP|GIT_TRACE_PERFORMANCE|GIT_CEILING_DIRECTORIES|GOPROXY|GOSUMDB|GONOSUMDB|GONOSUMCHECK|GOINSECURE|GOPRIVATE|GONOPROXY|GOTOOLCHAIN|GODEBUG|GOENV|GOEXPERIMENT|GOFIPS140|GOVCS|LOCALDOMAIN|RES_OPTIONS|PS0|PS1|PS2|PS4|PYTHONBREAKPOINT|NODE_REPL_HISTORY|NODE_COMPILE_CACHE|SHELL)$/i;
+const REDIRECT_ENV = /^(?:PATH|HOME|TMPDIR|TMP|TEMP|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CONFIG_DIRS|XDG_DATA_DIRS|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR|IFS|CDPATH|GLOBIGNORE|FIGNORE|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|GIT_SSL_NO_VERIFY|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|FTP_PROXY|SOCKS_PROXY|http_proxy|https_proxy|all_proxy|ftp_proxy|socks_proxy|no_proxy|NO_PROXY|NPM_CONFIG_[A-Za-z0-9_]+|npm_config_[a-z0-9_]+|GIT_DIR|GIT_WORK_TREE|GIT_NAMESPACE|GIT_TRACE|GIT_TRACE_PACKET|GIT_TRACE_SETUP|GIT_TRACE_PERFORMANCE|GIT_CEILING_DIRECTORIES|GOPROXY|GOSUMDB|GONOSUMDB|GONOSUMCHECK|GOINSECURE|GOPRIVATE|GONOPROXY|GOTOOLCHAIN|GODEBUG|GOENV|GOEXPERIMENT|GOFIPS140|GOVCS|LOCALDOMAIN|RES_OPTIONS|PS0|PS1|PS2|PS4|PYTHONBREAKPOINT|NODE_REPL_HISTORY|NODE_COMPILE_CACHE|SHELL|DBUS_SESSION_BUS_ADDRESS|LESS|GIT_DIFF_OPTS|GIT_SSH_VARIANT|GIT_CONFIG_NOSYSTEM)$/i;
 
 /** Pager/editor family members get a value check: safe pager names pass. */
 const PAGER_SAFE_VALUES = /^(?:cat|less|more|most|pg|lv)$/i;
@@ -532,6 +598,134 @@ export function gitRemoteHostCandidates(arg) {
 }
 
 /**
+ * Brace expansion produces a small set of alternates: `{a,b}` -> a b,
+ * `{1..4}` -> 1 2 3 4, `{a..d}` -> a b c d. Nested and repeated braces
+ * combine multiplicatively; expansion is bounded so a hostile `{1..1000000}`
+ * range cannot blow up the candidate list. Anything over budget keeps its
+ * literal form so the suspicious text still reaches inspection.
+ */
+export function expandBraceAlternates(s, limit = 64) {
+  const results = [];
+  const work = [String(s || '')];
+  while (work.length > 0) {
+    const item = work.pop();
+    const start = item.indexOf('{');
+    let end = -1;
+    if (start >= 0) {
+      let depth = 0;
+      for (let i = start; i < item.length; i++) {
+        if (item[i] === '{') depth += 1;
+        else if (item[i] === '}') { depth -= 1; if (depth === 0) { end = i; break; } }
+      }
+    }
+    let variants = null;
+    if (start >= 0 && end > start) {
+      const body = item.slice(start + 1, end);
+      const seq = /^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$/.exec(body);
+      const aSeq = /^([a-zA-Z])\.\.([a-zA-Z])(?:\.\.(-?\d+))?$/.exec(body);
+      if (seq || aSeq) {
+        const src = seq || aSeq;
+        const step = src[3] ? Math.abs(Number(src[3])) || 1 : 1;
+        const a = seq ? Number(src[1]) : src[1].charCodeAt(0);
+        const b = seq ? Number(src[2]) : src[2].charCodeAt(0);
+        const dir = a <= b ? step : -step;
+        variants = [];
+        for (let n = a; a <= b ? n <= b : n >= b; n += dir) {
+          variants.push(seq ? String(n) : String.fromCharCode(n));
+        }
+      } else {
+        // Comma alternates; `{a}` alone stays literal in POSIX.
+        const parts = [];
+        let d = 0, last = 0, hasComma = false;
+        for (let k = 0; k <= body.length; k++) {
+          const c = body[k];
+          if (c === '{') d += 1;
+          else if (c === '}') d -= 1;
+          if ((c === ',' && d === 0) || k === body.length) {
+            if (c === ',' && d === 0) hasComma = true;
+            parts.push(body.slice(last, k));
+            last = k + 1;
+          }
+        }
+        if (hasComma) variants = parts;
+      }
+    }
+    if (variants === null || results.length + work.length + variants.length > limit) {
+      results.push(item);
+      continue;
+    }
+    const prefix = item.slice(0, start);
+    const suffix = item.slice(end + 1);
+    for (const v of variants) work.push(`${prefix}${v}${suffix}`);
+  }
+  return results;
+}
+
+/**
+ * Sensitive-path samples a wildcard argument can expand to. `*` and `?` never
+ * match a leading dot, so a glob only reaches dotfiles when its first pattern
+ * character is literal (or a class containing `.`).
+ */
+const GLOB_SENSITIVE_SAMPLES = [
+  'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', 'environment', 'env.list',
+  'credentials.json', '.env', '.env.local', '.envrc', '.npmrc', '.pypirc',
+  '.netrc', '.git-credentials', '.bash_history', '.zsh_history', '.ssh/config',
+  '.ssh/id_rsa', '.ssh/id_ed25519', '.aws/credentials', '.aws/config',
+  '.gnupg/secring.gpg', '.git/config', '.gitconfig', '.bashrc', '.zshrc',
+  '.profile', '.zshenv', 'authorized_keys', 'known_hosts', 'server.key',
+  'private.pem', 'client.p12', 'database.yml', 'secrets.yaml',
+  'api.token', 'app.env', 'prod.env', 'aws.credentials', '.pgpass',
+  '/etc/passwd', '/etc/shadow', '/etc/sudoers', '/proc/self/environ',
+];
+
+/** Commands whose glob arguments read file contents (not just metadata). */
+const CONTENT_READER_COMMANDS = new Set([
+  'cat', 'head', 'tail', 'sed', 'grep', 'rg', 'sort', 'wc', 'cut', 'awk',
+  'gawk', 'mawk', 'nawk', 'perl', 'ruby', 'python', 'python3', 'xxd', 'od',
+  'strings', 'file', 'less', 'more', 'base64', 'tee', 'dd', 'tar', 'zip',
+  'openssl', 'diff', 'patch', 'sha1sum', 'sha256sum', 'sha512sum', 'md5sum',
+  'source', '.',
+]);
+
+/** Convert one glob segment to a RegExp source (`*`/`?` never match `.`). */
+function globSegmentToRegex(seg) {
+  let out = '';
+  let first = true;
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === '*') out += first ? '[^./]*' : '[^/]*';
+    else if (c === '?') out += first ? '[^./]' : '[^/]';
+    else if (c === '[') {
+      const close = seg.indexOf(']', i + 1);
+      if (close < 0) { out += '\\['; continue; }
+      let cls = seg.slice(i + 1, close);
+      cls = cls.startsWith('!') ? `^${cls.slice(1)}` : cls;
+      out += `[${cls.replace(/\\/g, '\\\\')}]`;
+      i = close;
+    } else {
+      out += c.replace(/[.+^$(){}|\\]/g, '\\$&');
+    }
+    first = false;
+  }
+  return out;
+}
+
+export function globMayMatchSensitive(pattern) {
+  const p = String(pattern || '');
+  if (!/[*?\[]/.test(p)) return false;
+  const segs = p.split('/');
+  const src = segs.map(globSegmentToRegex).join('/');
+  let rx;
+  try { rx = new RegExp(`^${src}$`); } catch { return true; }
+  for (const sample of GLOB_SENSITIVE_SAMPLES) {
+    if (rx.test(sample)) return true;
+    const tail = sample.split('/').slice(-segs.length).join('/');
+    if (rx.test(tail)) return true;
+  }
+  return false;
+}
+
+/**
  * Path-like substrings hidden inside a flag-attached argument: `-o/etc/x`,
  * `--output=/etc/x`, `-F file=@/etc/passwd`, `--data @/etc/passwd`,
  * `--rsh="ssh -i /key"`. Returns the candidate path tokens.
@@ -542,8 +736,13 @@ export function pathLikeCandidates(arg) {
   if (!s) return out;
   const seen = new Set();
   const push = (v) => {
-    const t = String(v || '').trim().replace(/^["']+|["']+$/g, '');
-    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+    // Brace alternates (`{a,b}`) each become their own candidate so a
+    // sensitive path cannot hide inside an expansion list.
+    for (const cand of expandBraceAlternates(v)) {
+      const t = String(cand || '').trim().replace(/^["']+|["']+$/g, '');
+      if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+      if (out.length >= 96) return;
+    }
   };
   // Whole argument is the common case.
   push(s);
@@ -561,6 +760,18 @@ export function pathLikeCandidates(arg) {
   // @/path upload syntax (curl -F file=@/etc/passwd, --data @/etc/passwd).
   const at = s.indexOf('@/');
   if (at >= 0) push(s.slice(at + 1));
+  // Parameter-expansion payloads: `${x:-/p}` substitutes /p when unset,
+  // `${x/p/r}` substitutes r, `${x:=d}`/`${x:?m}`/`${x:+a}`/`${x#p}`/`${x%p}`
+  // all embed a word the raw argument hides. `${x}` carries no path value.
+  // The two-character `:`-forms must match before the bare `:` alternative.
+  for (const m of s.matchAll(/\$\{[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?(?::-|:\+|:=|:\?|:|\/|#|%|-|\+|=|\?)([^}]*)\}/g)) {
+    for (const t of String(m[1] || '').split(/\s+/)) {
+      push(t);
+      // `${x/pat/repl}`: the path lives after the pattern's first `/`.
+      const sl = t.indexOf('/');
+      if (sl >= 0) push(t.slice(sl));
+    }
+  }
   // Embedded whitespace: only flag/`=` arguments get tokenized
   // (`--rsh="ssh -i /key"`, `-c "cmd /path"`). A plain word with spaces is
   // prose or data (`echo "see /etc/passwd"`, `history -s "rm -rf /tmp/x"`),
@@ -942,6 +1153,23 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
           rec.trail, 'Inspect or replace piped shell execution with an explicit static script or allowlisted command.');
         continue;
       }
+      if (rec.command === '__find_delete__') {
+        addFinding('CAP-CMD-01', 'high', 'find -delete removes every matched file',
+          `find -delete at [${rec.trail.join(' -> ')}] deletes matched paths without a prompt.`,
+          rec.trail, 'List the matches first and remove them with an explicit reviewed command.');
+        continue;
+      }
+      // `bash --rcfile file` / `--init-file=file`: the named file runs as
+      // shell code at startup, so it is an execution channel, not an inert
+      // option value.
+      if (rec.startupScriptFile) {
+        const sf = String(rec.startupScriptFile);
+        const sensitive = isSensitivePath(sf) || hasTraversalSegment(sf);
+        addFinding('CAP-CMD-05', sensitive ? 'critical' : 'high',
+          `Shell startup script "${sf}" executes as code`,
+          `"${rec.command}" runs "${sf}" as code at startup at [${rec.trail.join(' -> ')}].`,
+          rec.trail, 'Run an explicit reviewed script file instead of shell rc/init-file injection.');
+      }
       // Program text fed to an interpreter through stdin (heredoc body, piped
       // echo/printf, `< file`): the payload is Python/Node/Ruby code, not
       // shell, so flag the channel itself for human review regardless of what
@@ -990,11 +1218,58 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
         }
         continue;
       }
+      // `> file` alone: no command, but the write target still needs the
+      // same path checks an argument would get (truncate `> /etc/passwd`).
+      if (rec.command === '__redirect_only__') {
+        for (const target of rec.args || []) {
+          if (hasTraversalSegment(target)) {
+            addFinding('CAP-PATH-01', 'critical', `Path traversal ".." in redirect target`,
+              `Redirect target "${target}" at [${rec.trail.join(' -> ')}] contains "..".`,
+              rec.trail, 'Use canonical workspace-relative paths without traversal.');
+          } else if (target && !isWithinWorkspace(target, policy.workspaceRoot) && !target.startsWith('/dev/null')) {
+            addFinding('CAP-PATH-02', 'high', `Redirect target "${target}" outside workspace`,
+              `Redirect target "${target}" at [${rec.trail.join(' -> ')}] escapes "${policy.workspaceRoot}".`,
+              rec.trail, `Keep redirect targets inside ${policy.workspaceRoot}.`);
+          }
+          if (isSensitivePath(target)) {
+            addFinding('CAP-SECRET-01', 'critical', `Sensitive file path "${target}" as redirect target`,
+              `Credential/system target at [${rec.trail.join(' -> ')}].`,
+              rec.trail, 'Do not redirect secret or system files.');
+          }
+        }
+        continue;
+      }
+      // Redirect targets (`cmd > out`, `cat x < in`) are no longer part of
+      // argv, but they still need the same path checks: `cat x > /etc/cron.d/j`
+      // must not pass because the target left the argument list. Run before
+      // any `continue` below so fd-setup records (`exec > /etc/passwd`) are
+      // still judged.
+      for (const target of rec.redirectTargets || []) {
+        if (hasTraversalSegment(target)) {
+          addFinding('CAP-PATH-01', 'critical', `Path traversal ".." in redirect target`,
+            `Redirect target "${target}" at [${rec.trail.join(' -> ')}] contains "..".`,
+            rec.trail, 'Use canonical workspace-relative paths without traversal.');
+        } else if (target && !isWithinWorkspace(target, policy.workspaceRoot) && !target.startsWith('/dev/null')) {
+          addFinding('CAP-PATH-02', 'high', `Redirect target "${target}" outside workspace`,
+            `Redirect target "${target}" at [${rec.trail.join(' -> ')}] escapes "${policy.workspaceRoot}".`,
+            rec.trail, `Keep redirect targets inside ${policy.workspaceRoot}.`);
+        }
+        if (isSensitivePath(target)) {
+          addFinding('CAP-SECRET-01', 'critical', `Sensitive file path "${target}" as redirect target`,
+            `Credential/system target at [${rec.trail.join(' -> ')}].`,
+            rec.trail, 'Do not redirect secret or system files.');
+        }
+      }
+
+      // `env --version` / `env --help` answered and exited at parse time.
+      if (rec.command === '__env_query__') continue;
       // Bare wrapper (`env`, `xargs`, `sudo`, `timeout`, ... consuming the
-      // whole line): still a real command with real side effects.
+      // whole line): still a real command with real side effects. `exec`,
+      // `command`, and `builtin` with no operand are no-ops or fd setup.
       const bareMatch = /^__bare_(.+?)__$/.exec(rec.command);
       if (bareMatch) {
         const bare = bareMatch[1];
+        if (bare === 'exec' || bare === 'command' || bare === 'builtin') continue;
         if (bare === 'env') {
           addFinding('CAP-SECRET-02', 'critical', 'Bare "env" dumps the process environment',
             'A bare env call prints every environment variable, including secrets the policy never meant to expose.',
@@ -1015,11 +1290,20 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
         continue;
       }
 
+      // Environment assignments only apply where the shell would treat them
+      // as env writes: the leading `NAME=value cmd` prefix and words consumed
+      // by env-family wrappers. `sudo`/`doas`/`pkexec`/`setpriv` also take
+      // NAME=value arguments for the child, so their raw words stay in scope;
+      // for everything else an arg like `npm pkg set browser=x` is data, not
+      // an environment assignment.
+      const envArgCarrier = (rec.trail || []).some((t) => ['env', 'sudo', 'doas', 'pkexec', 'setpriv'].includes(t));
+      const envWords = envArgCarrier ? (rec.rawWords || []) : (rec.envAssignments || []);
+
       // Secret assignments passed to wrapper binaries (env -i, env FOO=,
       // timeout, command) are consumed by the unwrapper and never reach arg
-      // inspection. Check the raw words for `NAME=secret` assignments.
+      // inspection. Check the assignment words for `NAME=secret` assignments.
       if (!policy.allowEnvSecrets) {
-        for (const w of rec.rawWords) {
+        for (const w of envWords) {
           const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(w);
           if (m && SECRET_ENV_NAMES.test(m[1])) {
             addFinding('CAP-SECRET-02', 'critical', `Secret env assignment "${m[1]}" in ${rec.command}`,
@@ -1035,7 +1319,7 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
       // NODE_OPTIONS), redirect resolution (PATH, HOME, proxies), or point
       // config/credential files at attacker-controlled locations. These are
       // never benign enough to allow silently.
-      for (const w of rec.rawWords || []) {
+      for (const w of envWords) {
         const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(w);
         if (!m) continue;
         const name = m[1];
@@ -1062,7 +1346,9 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
             /[\/\\;|&`$(){}<>\n]/.test(v) ||
             (!benignName && PAGER_DANGEROUS_BIN.test(base)) ||
             /^(?:sh|bash|zsh|dash|ash|ksh|mksh|fish|csh|tcsh)(?:\s|$)/i.test(v);
-          if (!benignName && dangerous) {
+          // A safe name only clears the check when the value IS the binary:
+          // `PAGER='cat /etc/passwd'` runs cat with a path argument.
+          if (!(benignName && v === base) && dangerous) {
             addFinding('CAP-ENV-02', 'medium', `Executable pager/editor env "${name}" in ${rec.command}`,
               `"${name}=${value.slice(0, 60)}" can run an arbitrary program when the tool pages output.`,
               rec.trail, 'Leave pager and editor variables unset or point them at reviewed binaries.');
@@ -1099,6 +1385,15 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
         addFinding('CAP-CMD-08', 'high', `xargs feeds stdin words as argv to "${rec.command}"`,
           `Arguments for "${rec.command}" at [${rec.trail.join(' -> ')}] come from piped input, not the inspected command line.`,
           rec.trail, 'Replace xargs-fed shells and network tools with an explicit static command.');
+      }
+
+      // `xargs -a file` / `--arg-file=file` builds the child argv from file
+      // contents the firewall never inspected.
+      if (rec.trail.includes('xargs') &&
+          [...(rec.args || []), ...(rec.rawWords || [])].some((a) => a === '-a' || a === '--arg-file' || a.startsWith('--arg-file='))) {
+        addFinding('CAP-CMD-08', 'medium', 'xargs reads child argv from an uninspected file',
+          `xargs -a/--arg-file at [${rec.trail.join(' -> ')}] builds argv from file contents outside the inspected command line.`,
+          rec.trail, 'List the arguments explicitly instead of reading argv from a file.');
       }
 
       const blockedInTrail = rec.trail.find((cmdName) => blockedSet.has(cmdName));
@@ -1180,6 +1475,20 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
                 rec.trail, 'Keep remote-shell selectors pinned to plain ssh.');
             }
           }
+          // Config-file flags merge attacker-chosen options into the parsed
+          // argv: `curl -K`, `wget --config`/`-i`, `ssh -F` can inject
+          // proxy/exec/URL settings the inspected command line never showed.
+          const cfgFlag =
+            (rec.command === 'curl' && (a === '-K' || a === '--config' || /^-K\S/.test(a) || a.startsWith('--config='))) ||
+            (rec.command === 'wget' && (a === '--config' || a === '-i' || a === '--input-file' || a.startsWith('--config=') || a.startsWith('--input-file=') || /^-i\S/.test(a))) ||
+            (/^(?:ssh|scp|sftp)$/.test(rec.command) && (a === '-F' || /^-F\S/.test(a)));
+          if (cfgFlag) {
+            const val = a.includes('=') ? a.slice(a.indexOf('=') + 1)
+              : (/^-[A-Za-z]\S/.test(a) && !a.startsWith('--') ? a.slice(2) : (rec.args[i + 1] || ''));
+            addFinding('CAP-CMD-03', 'high', `Config-file channel via "${rec.command}"`,
+              `"${rec.command}" merges options from "${String(val).slice(0, 60)}" at [${rec.trail.join(' -> ')}]; the file can inject proxy, exec, or URL settings.`,
+              rec.trail, 'Pass the exact flags on the command line instead of loading a config file.');
+          }
         }
         if (!policy.allowNetwork) {
           const allAllowed = urlHits.length > 0 && urlHits.every((u) => allowedDomains.has(u.host.toLowerCase()));
@@ -1189,7 +1498,11 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
               rec.trail, 'Run offline or add explicit domain allowlist entry.');
           }
         }
-      } else if (!allowedSet.has(rec.command) && !SHELL_BINARIES.has(rec.command) && !SAFE_BUILTINS.has(rec.command)) {
+      } else if (!allowedSet.has(rec.command) && !SHELL_BINARIES.has(rec.command) && !SAFE_BUILTINS.has(rec.command) &&
+                 rec.command !== '__control_spec__' &&
+                 !((rec.args || []).length === 0 && /^[A-Za-z_][A-Za-z0-9_]*(?:\+\+|--|[-+*/%&|^]?=.*)$/.test(rec.command))) {
+        // `__control_spec__` is a compound-statement spec (`for x in ...`),
+        // not a command; a bare `x++`/`x+=1` word is arithmetic, not exec.
         addFinding('CAP-CMD-02', 'medium', `Unlisted command "${rec.command}" outside capability allowlist`,
           `Command "${rec.command}" at [${rec.trail.join(' -> ')}] is not in allowedCommands.`,
           rec.trail, `Either add "${rec.command}" to allowedCommands or replace with an allowed tool.`);
@@ -1223,12 +1536,29 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
               addFinding('CAP-SECRET-01', 'critical', `Sensitive file path "${arg}" in ${rec.command} env value`,
                 `Credential/system target at [${rec.trail.join(' -> ')}].`,
                 rec.trail, 'Do not pass secret or system credential files to shell commands.');
+            } else if (CONTENT_READER_COMMANDS.has(rec.command) && globMayMatchSensitive(arg)) {
+              addFinding('CAP-SECRET-01', 'critical', `Glob "${arg}" can expand to credential material`,
+                `Wildcard env value in [${rec.trail.join(' -> ')}] can match sensitive files at runtime.`,
+                rec.trail, 'Name the exact file instead of a wildcard that can reach secrets.');
             }
           }
           continue;
         }
         for (const arg of pathLikeCandidates(word)) {
           if (arg.startsWith('-') && !arg.startsWith('/')) continue;
+          // `cat ${x}` / `cat $file`: the real path is chosen at runtime and
+          // cannot be verified against the workspace. Only path-consuming
+          // commands get held (`echo $HOME` prints text, `$((1+2))` is
+          // arithmetic; neither reads a file). Literal defaults inside
+          // `${x:-/etc/passwd}` are extracted by pathLikeCandidates and stay
+          // covered for every command.
+          const dynamicPathArg = /^\$\{?[A-Za-z_]/.test(arg) || (arg.startsWith('$(') && !arg.startsWith('$(('));
+          if (dynamicPathArg &&
+              (CONTENT_READER_COMMANDS.has(rec.command) || SHELL_BINARIES.has(rec.command) || STDIN_INTERPRETERS_SET.has(rec.command))) {
+            addFinding('CAP-PATH-03', 'medium', `Dynamic path expansion "${arg.slice(0, 40)}" in ${rec.command} cannot be verified`,
+              `Path "${arg.slice(0, 60)}" at [${rec.trail.join(' -> ')}] resolves at runtime.`,
+              rec.trail, `Keep file arguments inside ${policy.workspaceRoot} with literal paths.`);
+          }
           if (hasTraversalSegment(arg)) {
             addFinding('CAP-PATH-01', 'critical', `Path traversal ".." detected in ${rec.command} argument`,
               `Normalized token "${arg}" in [${rec.trail.join(' -> ')}] contains "..".`,
@@ -1247,6 +1577,12 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
             addFinding('CAP-SECRET-01', 'critical', `Sensitive file path "${arg}" referenced by ${rec.command}`,
               `Credential/system target at [${rec.trail.join(' -> ')}].`,
               rec.trail, 'Do not pass secret or system credential files to shell commands.');
+          } else if (CONTENT_READER_COMMANDS.has(rec.command) && globMayMatchSensitive(arg)) {
+            // `cat .env*` reads credential files at glob time: a wildcard
+            // that can reach secret basenames is as dangerous as naming them.
+            addFinding('CAP-SECRET-01', 'critical', `Glob "${arg}" can expand to credential material`,
+              `Wildcard argument in [${rec.trail.join(' -> ')}] can match sensitive files at runtime.`,
+              rec.trail, 'Name the exact file instead of a wildcard that can reach secrets.');
           }
           if (!policy.allowEnvSecrets && /\$\{?([A-Z0-9_]+)\}?/.test(arg) && SECRET_ENV_NAMES.test(arg)) {
             addFinding('CAP-SECRET-02', 'critical', `Secret env expansion "${arg}" in ${rec.command}`,
@@ -1263,7 +1599,7 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
       // repoints a command name at an arbitrary binary, alias redefines a
       // command name, and bare fc/fc -s re-executes history.
       if (BUILTIN_EXEC_ARG_CHECKS.has(rec.command)) {
-        checkBuiltinExecArgs(rec, addFinding, { blockedSet, allowedSet });
+        checkBuiltinExecArgs(rec, addFinding, { blockedSet, allowedSet, netCmdSet, policy });
       }
 
       // `sed` hides execution inside a single script argument: the `e`
@@ -1271,6 +1607,83 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
       // write files, and `-f` loads script text the firewall never sees.
       if (rec.command === 'sed') {
         checkSedArgs(rec, addFinding);
+      }
+
+      // awk-family programs hide execution inside the script text argument:
+      // system(), @include/@load, and `cmd | getline` / `print | "cmd"` all
+      // run or load code the command line never names.
+      if (/^(?:awk|gawk|mawk|nawk)$/.test(rec.command)) {
+        checkAwkArgs(rec, addFinding);
+      }
+
+      // Program-loader flags on allowlisted tools: `rg --pre sh` runs a
+      // named binary per file, `sort --compress-program` runs it on
+      // intermediate output, `pytest -p` imports an arbitrary plugin module,
+      // and `pytest -c`/`--import-mode` redirect the test harness config.
+      if (rec.command === 'rg') {
+        for (const a of rec.args) {
+          if (a === '--pre' || a.startsWith('--pre=') || a === '--hostname-bin' || a.startsWith('--hostname-bin=')) {
+            addFinding('CAP-CMD-03', 'high', `rg exec channel "${a.slice(0, 40)}"`,
+              `${a} at [${rec.trail.join(' -> ')}] runs a named program inside rg; the command line hides which binary executes.`,
+              rec.trail, 'Do not use rg --pre/--hostname-bin from tool calls.');
+            break;
+          }
+        }
+      }
+      if (rec.command === 'sort') {
+        for (const a of rec.args) {
+          if (a === '--compress-program' || a.startsWith('--compress-program=')) {
+            addFinding('CAP-CMD-03', 'high', `sort --compress-program runs a named binary`,
+              `--compress-program at [${rec.trail.join(' -> ')}] execs a compressor program the command line never names.`,
+              rec.trail, 'Do not use sort --compress-program from tool calls.');
+            break;
+          }
+        }
+      }
+      if (rec.command === 'pytest') {
+        for (const a of rec.args) {
+          if (a === '-p' || /^-p[^\d\s]/.test(a)) {
+            addFinding('CAP-CMD-03', 'high', `pytest -p imports an arbitrary plugin module`,
+              `pytest -p at [${rec.trail.join(' -> ')}] loads the named module at startup; arbitrary code executes.`,
+              rec.trail, 'Do not load pytest plugins from tool calls; run the suite with reviewed conftest.');
+            break;
+          }
+          if (a === '-c' || a === '--import-mode' || a.startsWith('--import-mode=') || a === '--confcutdir' || a.startsWith('--confcutdir=')) {
+            addFinding('CAP-CMD-05', 'medium', `pytest option "${a.slice(0, 40)}" redirects the test harness`,
+              `${a} at [${rec.trail.join(' -> ')}] points pytest at a different config or import path than reviewed.`,
+              rec.trail, 'Run pytest with the repository config the review covered.');
+            break;
+          }
+        }
+      }
+      if (rec.command === 'node') {
+        for (let i = 0; i < rec.args.length; i++) {
+          const a = rec.args[i];
+          if (a === '--run' || a.startsWith('--run=')) {
+            addFinding('CAP-CMD-04', 'medium', `node --run executes a package.json script`,
+              `node --run at [${rec.trail.join(' -> ')}] runs a named package script; the script body is outside the command line.`,
+              rec.trail, 'Audit the package script or run the steps as explicit commands.');
+            break;
+          }
+          if (a === '--test-reporter' || a.startsWith('--test-reporter=')) {
+            addFinding('CAP-CMD-03', 'high', `node --test-reporter loads a reporter module`,
+              `--test-reporter at [${rec.trail.join(' -> ')}] resolves and executes an arbitrary module.`,
+              rec.trail, 'Use the built-in reporters from tool calls.');
+            break;
+          }
+          if (/^--inspect/.test(a)) {
+            addFinding('CAP-CMD-05', 'medium', `node "${a.slice(0, 40)}" opens the V8 inspector`,
+              `--inspect flags at [${rec.trail.join(' -> ')}] expose a debug port outside the reviewed surface.`,
+              rec.trail, 'Run node without --inspect flags from tool calls.');
+            break;
+          }
+          if (a === '--openssl-config' || a.startsWith('--openssl-config=')) {
+            addFinding('CAP-CMD-05', 'medium', `node --openssl-config points at an unreviewed config`,
+              `--openssl-config at [${rec.trail.join(' -> ')}] loads an OpenSSL config file that can register engines.`,
+              rec.trail, 'Do not redirect the OpenSSL config from tool calls.');
+            break;
+          }
+        }
       }
 
       // An interpreter whose program text arrives through a process
@@ -1340,6 +1753,45 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
             }
           }
         }
+        // `--upload-pack`/`-u` on clone/fetch-pack names the local program
+        // git execs to speak the protocol; `ext::` transports run a shell
+        // command outright. `-u` on other subcommands (`branch -u`,
+        // `push -u`, `fetch -u`) is an unrelated option.
+        const packSub = subcommand === 'clone' || subcommand === 'fetch-pack';
+        for (let i = 0; i < rec.args.length; i++) {
+          const a = rec.args[i];
+          if (packSub && (/^(?:--upload-pack|-u)(?:=|$)/.test(a) || /^(?:--exec|-e)(?:=|$)/.test(a))) {
+            const val = a.includes('=') ? a.slice(a.indexOf('=') + 1) : (rec.args[i + 1] || '');
+            addFinding('CAP-GIT-03', 'high', 'git upload-pack selector runs a local program',
+              `"${String(val).slice(0, 60)}" in [${rec.trail.join(' -> ')}] is executed by git as the remote protocol program.`,
+              rec.trail, 'Do not override upload-pack/receive-pack programs from tool calls.');
+          }
+          if (a.startsWith('ext::')) {
+            addFinding('CAP-GIT-03', 'critical', 'git ext:: transport runs a shell command',
+              `Remote "${a.slice(0, 60)}" at [${rec.trail.join(' -> ')}] executes its transport string as a shell command.`,
+              rec.trail, 'Do not use ext:: git transports; they execute arbitrary commands.');
+          }
+        }
+        // `git archive --remote=` contacts a remote daemon outside the URL
+        // checks; inspect the host and hold the remote channel itself.
+        if (subcommand === 'archive') {
+          for (let i = 0; i < rec.args.length; i++) {
+            const a = rec.args[i];
+            if (a === '--remote' || a.startsWith('--remote=')) {
+              const val = a.includes('=') ? a.slice(a.indexOf('=') + 1) : (rec.args[i + 1] || '');
+              addFinding('CAP-NET-01', 'high', 'git archive reaches a remote daemon',
+                `git archive --remote "${String(val).slice(0, 60)}" at [${rec.trail.join(' -> ')}] contacts a remote git daemon outside the network checks.`,
+                rec.trail, 'Archive from local refs instead of remote daemons.');
+              for (const cand of gitRemoteHostCandidates(val)) {
+                if (policy.blockPrivateIps && isPrivateOrInternalHost(cand)) {
+                  addFinding('CAP-SSRF-01', 'critical', 'SSRF via git archive --remote host',
+                    `git archive --remote "${String(val).slice(0, 60)}" resolves to an internal or metadata address.`,
+                    rec.trail, 'Do not reach remote git archives from tool calls.');
+                }
+              }
+            }
+          }
+        }
         if ((subcommand === 'push' || subcommand === 'send-pack') && !rest.includes('--dry-run') && !rest.includes('-n')) {
           addFinding('CAP-GIT-01', 'high', `Remote git ${subcommand} requires human review`,
             `${subcommand} detected in [${rec.trail.join(' -> ')}].`,
@@ -1353,10 +1805,59 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
           addFinding('CAP-GIT-02', 'medium', `git worktree ${rest[0]} executes repository hooks`,
             `git worktree ${rest[0]} runs checkout hooks that may execute repo code.`,
             rec.trail, 'Run hook-executing git subcommands only after the hook scripts are reviewed.');
+        } else if (subcommand === 'submodule' && rest[0] === 'foreach') {
+          // `submodule foreach '<shell>'` runs the string in every submodule:
+          // a command channel invisible to the wrapper unwrap.
+          const payload = rest.slice(1).filter((a) => !a.startsWith('-')).join(' ');
+          addFinding('CAP-GIT-03', 'high', 'git submodule foreach runs a shell command per submodule',
+            `git submodule foreach at [${rec.trail.join(' -> ')}] executes the given shell string inside each submodule.`,
+            rec.trail, 'Do not run git submodule foreach from tool calls.');
+          for (const sub of analyzeShellAst(payload, 2).records) {
+            const payloadHit = (sub.trail || []).find((c) => blockedSet.has(c)) ||
+              (blockedSet.has(sub.command) ? sub.command : null);
+            if (payloadHit) {
+              addFinding('CAP-GIT-03', 'critical', `git submodule foreach payload runs "${payloadHit}"`,
+                `foreach shell at [${rec.trail.join(' -> ')}] contains blocked command "${payloadHit}".`,
+                rec.trail, 'Do not run git submodule foreach from tool calls.');
+              break;
+            }
+          }
         } else if (subcommand === 'submodule' && ['update', 'add'].includes(rest[0])) {
           addFinding('CAP-GIT-02', 'medium', `git submodule ${rest[0]} checks out hook-running trees`,
             `git submodule ${rest[0]} runs checkout hooks inside submodules.`,
             rec.trail, 'Review submodule hook scripts before updating.');
+        } else if (subcommand === 'remote') {
+          // `remote add/set-url` rewrites where objects come from (future
+          // egress), `remote update/prune/show` contacts remotes now; bare
+          // `remote`/`get-url`/`list` only read config.
+          const verb = rest.find((a) => !a.startsWith('-')) || '';
+          if (['add', 'set-url', 'set-branches', 'set-head', 'remove', 'rename', 'update', 'prune', 'show'].includes(verb)) {
+            addFinding('CAP-GIT-02', 'medium', `git remote ${verb} mutates or contacts remotes`,
+              `git remote ${verb} at [${rec.trail.join(' -> ')}] changes remote URLs or performs network egress.`,
+              rec.trail, 'Keep remote configuration inside the reviewed baseline.');
+          }
+        } else if (GIT_EGRESS_SUBCOMMANDS.has(subcommand)) {
+          // fetch/fetch-pack/ls-remote pull objects or ref advertisements
+          // from a remote: network egress the generic URL scan cannot see.
+          addFinding('CAP-NET-01', 'medium', `git ${subcommand} performs remote egress`,
+            `git ${subcommand} at [${rec.trail.join(' -> ')}] contacts a remote; allowNetwork is off.`,
+            rec.trail, 'Keep the tree offline or add the host to allowedDomains.');
+        } else if (subcommand === 'clean') {
+          addFinding('CAP-GIT-02', 'medium', `git clean deletes untracked files`,
+            `git clean at [${rec.trail.join(' -> ')}] removes untracked paths permanently.`,
+            rec.trail, 'List the paths and remove them with an explicit reviewed command.');
+        } else if (subcommand === 'hook' && rest[0] === 'run') {
+          addFinding('CAP-GIT-03', 'high', `git hook run executes a repository hook`,
+            `git hook run at [${rec.trail.join(' -> ')}] executes the named hook directly.`,
+            rec.trail, 'Do not run repository hooks from tool calls.');
+        } else if (subcommand === 'grep' && rest.some((a) => a === '-O' || a.startsWith('--open-files-in-pager'))) {
+          addFinding('CAP-GIT-02', 'medium', `git grep -O pipes matches into the pager`,
+            `git grep -O at [${rec.trail.join(' -> ')}] runs the configured pager on every match.`,
+            rec.trail, 'Do not open pager channels from tool calls.');
+        } else if (subcommand === 'apply' && rest.includes('--unsafe-paths')) {
+          addFinding('CAP-GIT-02', 'medium', `git apply --unsafe-paths bypasses the worktree check`,
+            `--unsafe-paths at [${rec.trail.join(' -> ')}] lets a patch write outside the worktree.`,
+            rec.trail, 'Apply only patches that stay inside the worktree.');
         } else if (subcommand === 'bisect' && rest.includes('run')) {
           // `git bisect run <cmd>` executes an arbitrary command at every step.
           addFinding('CAP-GIT-03', 'high', 'git bisect run executes an arbitrary command per step',
@@ -1366,6 +1867,12 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
           addFinding('CAP-GIT-02', 'medium', `git stash ${rest[0]} runs merge machinery`,
             `git stash ${rest[0]} merges trees and can run hooks.`,
             rec.trail, 'Review stash hook scripts before applying.');
+        } else if (subcommand && GIT_PROGRAM_SUBCOMMANDS.has(subcommand)) {
+          // shell/fast-import/svn/p4/imap-send and the protocol daemons run
+          // helper programs or command channels outside the inspected line.
+          addFinding('CAP-GIT-03', 'high', `git ${subcommand} runs a helper program or command channel`,
+            `git ${subcommand} at [${rec.trail.join(' -> ')}] executes helper/protocol code outside the inspected command line.`,
+            rec.trail, 'Do not run git helper daemons or command-string subcommands from tool calls.');
         } else if (subcommand && GIT_HOOK_SUBCOMMANDS.has(subcommand)) {
           // commit/merge/rebase/pull/am/checkout/clone all execute repo hooks
           // and can run attacker-controlled code if hooks were tampered with.
@@ -1457,10 +1964,56 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
   };
 }
 
+/**
+ * awk program text that runs or loads code: system(), @include/@load
+ * directives, `cmd | getline` reads, and `print > "cmd"` / `print | "cmd"`
+ * writes are all execution channels inside an otherwise-plain arg.
+ */
+const AWK_EXEC_SCRIPT_RE = /(?:\bsystem\s*\(|@include\b|@load\b|\bgetline\b[^;\n]*[|<]|\b(?:print|printf)\b[^;\n]*[|>])/;
+
+const AWK_FILE_FLAGS = new Set(['-f', '--file', '-i', '--include', '--exec']);
+const AWK_SKIP_VALUE_FLAGS = new Set(['-e', '--source', '-v', '--assign', '-F', '--field-separator', '-W', '-d', '--dump-variables']);
+
+function checkAwkArgs(rec, addFinding) {
+  const scriptParts = [];
+  let loadsFile = false;
+  for (let i = 0; i < rec.args.length; i++) {
+    const a = rec.args[i];
+    if (a === '--') break;
+    if (AWK_FILE_FLAGS.has(a)) {
+      loadsFile = true;
+      i += 1;
+      continue;
+    }
+    if (/^-(?:f|i)\S/.test(a) || a.startsWith('--file=') || a.startsWith('--include=') || a.startsWith('--exec=')) {
+      loadsFile = true;
+      continue;
+    }
+    if (AWK_SKIP_VALUE_FLAGS.has(a)) {
+      i += 1;
+      continue;
+    }
+    if (a.startsWith('-')) continue;
+    scriptParts.push(a);
+  }
+  const scriptText = scriptParts.join(' ');
+  if (loadsFile) {
+    addFinding('CAP-CMD-03', 'high', `awk loads program text from a file flag`,
+      `awk at [${rec.trail.join(' -> ')}] runs script or library contents from an uninspected file.`,
+      rec.trail, 'Inline a reviewed awk program or use an explicit allowlisted command.');
+    return;
+  }
+  if (AWK_EXEC_SCRIPT_RE.test(scriptText)) {
+    addFinding('CAP-CMD-03', 'high', `awk program text contains an execution channel`,
+      `awk script at [${rec.trail.join(' -> ')}] uses system(), @include/@load, or a pipe redirect that runs uninspected code.`,
+      rec.trail, 'Replace awk system()/pipe calls with an explicit allowlisted command.');
+  }
+}
+
 const GIT_GLOBAL_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env']);
 
 /** Keys whose git config value can execute code or redirect a hook. */
-const GIT_DANGEROUS_CONFIG_KEYS = /^(?:alias\.|core\.(?:sshcommand|fsmonitor|pager|editor|askpass|excludesfile|attributesfile|hookspath|hooksdir|browser|gitproxy)|credential\.|pager\.|diff\.(?:external|[^.\s]+\.(?:command|textconv))|textconv\.|filter\.|merge\.(?:driver|[^.\s]+\.driver)|sendemail\.|http\.(?:proxy|sslverify|sslcainfo|sslcapath)|url\.|include\.?|includeif\.|gpg\.program|instaweb\.|browser\.|web\.browser|man\.viewer|difftool\.|mergetool\.|merge\.tool|diff\.tool|sequence\.editor)/i;
+const GIT_DANGEROUS_CONFIG_KEYS = /^(?:alias\.|core\.(?:sshcommand|sshvariant|fsmonitor|pager|editor|askpass|excludesfile|attributesfile|hookspath|hooksdir|browser|gitproxy)|credential\.|pager\.|diff\.(?:external|[^.\s]+\.(?:command|textconv|cachetextconv))|textconv\.|filter\.|merge\.(?:driver|tool|[^.\s]+\.(?:driver|recursive))|sendemail\.|http\.(?:proxy|sslverify|sslcainfo|sslcapath)|url\.|include\.?|includeif\.|protocol\.|init\.templatedir|maintenance\.|tar\.[^.\s]+\.command|interactive\.|lfs\.|submodule\.[^.\s]+\.(?:update|command)|remote\.[^.\s]+\.(?:proxy|helper|uploadpack|receivepack|pushproxy)|gpg\.(?:program|ssh\.|openpgp\.|x509\.)|help\.manviewer|instaweb\.|browser\.|web\.browser|man\.viewer|difftool\.|mergetool\.|diff\.tool|sequence\.editor|imap\.|sendmail\.)/i;
 
 /** Git subcommands that execute hooks, merge machinery, external tools, or patch scripts. */
 const GIT_HOOK_SUBCOMMANDS = new Set([
@@ -1473,6 +2026,26 @@ const GIT_HOOK_SUBCOMMANDS = new Set([
 
 /** git stash verbs that run merge machinery and hooks. */
 const GIT_STASH_MUTATING = new Set(['pop', 'apply', 'drop', 'clear', 'save', 'branch', 'create', 'store', 'push']);
+
+/**
+ * Git subcommands that execute helper programs or command channels directly:
+ * `git shell -c` runs protocol commands, fast-import consumes a scripted
+ * stream, svn/p4/imap-send exec helper programs, and the *-pack/archive
+ * daemons expose repo protocol endpoints.
+ */
+const GIT_PROGRAM_SUBCOMMANDS = new Set([
+  'shell', 'fast-import', 'imap-send', 'http-backend', 'cvsserver',
+  'upload-pack', 'receive-pack', 'upload-archive', 'svn', 'p4',
+  'index-pack', 'pack-objects',
+  // The remote-<scheme> helpers are protocol transports git execs; nobody
+  // types them directly, and `remote-ext`/`remote-fd`/`remote-testgit` run
+  // command strings passed as arguments.
+  'remote-https', 'remote-http', 'remote-ftp', 'remote-ftps',
+  'remote-fd', 'remote-ext', 'remote-testgit',
+]);
+
+/** Git subcommands that contact remotes: egress outside the URL host scan. */
+const GIT_EGRESS_SUBCOMMANDS = new Set(['fetch', 'fetch-pack', 'ls-remote']);
 
 /**
  * Interpreters that can run arbitrary inline code from a flag argument.
@@ -1524,13 +2097,14 @@ const NPM_CODE_SUBCOMMANDS = new Set([
   'audit', 'fund', 'bugs', 'docs', 'repo', 'star', 'unstar', 'access',
   'adduser', 'login', 'logout', 'token', 'profile', 'team', 'org',
   'deprecate', 'dist-tag', 'ping', 'shrinkwrap', 'sbom', 'explain', 'dlx',
-  // Read-only-looking subcommands still hit the registry: they are network
-  // egress the offline policy never authorized.
-  'view', 'v', 'info', 'show', 'search', 's', 'outdated', 'ls-remote',
+  // `unpublish` yanks published package versions; read-only-looking
+  // subcommands still hit the registry: they are network egress the offline
+  // policy never authorized.
+  'unpublish', 'view', 'v', 'info', 'show', 'search', 's', 'outdated', 'ls-remote',
 ]);
 
 /** npm subcommands that mutate config or open an editor/browser. */
-const NPM_MUTATING_SUBS = new Set(['config', 'c', 'edit', 'explore', 'hook']);
+const NPM_MUTATING_SUBS = new Set(['config', 'c', 'edit', 'explore', 'hook', 'pkg']);
 
 /** Flags forwarded after `npm <script> --` that load code into the runner. */
 const NPM_PASSTHROUGH_DANGER = /^(?:-r|--require|--import|--loader|--experimental-loader|--eval|-e|--print|--inspect)/;
@@ -1586,6 +2160,12 @@ function extractInlineCode(rec) {
         if (sub === 'config' || sub === 'c') {
           if (['set', 'delete', 'edit', 'rm'].includes(verb)) {
             return { kind: 'npm-script', code: `npm config ${verb} mutates execution settings`, command: cmd };
+          }
+        } else if (sub === 'pkg') {
+          // `pkg set|fix|delete` rewrites package.json (scripts, bin, deps);
+          // `pkg get` only reads.
+          if (['set', 'fix', 'delete'].includes(verb)) {
+            return { kind: 'npm-script', code: `npm pkg ${verb} mutates package.json`, command: cmd };
           }
         } else {
           return { kind: 'npm-script', code: `npm ${sub} runs package-defined code or opens an editor`, command: cmd };

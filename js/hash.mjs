@@ -96,12 +96,29 @@ export function hmacSha256Hex(key, message) {
   return sha256Bytes(outer);
 }
 
-/** Stable JSON serialization: object keys sorted recursively, arrays preserved. */
-export function canonicalJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  // Skip undefined-valued keys exactly like JSON.stringify does: leaving them
-  // in as null would make {a:undefined} and {a:null} collide to one digest,
-  // so a receipt for one payload would validate the other.
-  return `{${Object.keys(value).filter((k) => value[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+/**
+ * Stable JSON serialization: object keys sorted recursively, arrays preserved.
+ * Mirrors JSON.stringify semantics for the edge types that can appear before
+ * serialization (toJSON values, functions, symbols, undefined) so the
+ * canonical form can never disagree with what JSON.stringify would emit for
+ * the same value. A depth cap turns hostile deeply-nested input into a thrown
+ * error instead of a stack overflow.
+ */
+export function canonicalJson(value, depth = 0) {
+  if (depth > 256) throw new Error('canonicalJson: value nested too deeply');
+  if (value && typeof value === 'object' && typeof value.toJSON === 'function') {
+    return canonicalJson(value.toJSON(), depth + 1);
+  }
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value ?? null) ?? 'null';
+  }
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v, depth + 1)).join(',')}]`;
+  // Skip undefined/function/symbol-valued keys exactly like JSON.stringify
+  // does: leaving them in would make {a:undefined} and {a:null} collide to one
+  // digest, so a receipt for one payload would validate the other.
+  const keys = Object.keys(value).filter((k) => {
+    const v = value[k];
+    return v !== undefined && typeof v !== 'function' && typeof v !== 'symbol';
+  });
+  return `{${keys.sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k], depth + 1)}`).join(',')}}`;
 }

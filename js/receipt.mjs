@@ -76,7 +76,13 @@ export function verifyReceipt(receipt) {
   if (identityChanged.length) {
     return { status: 'TAMPERED', changedFields: identityChanged, detail: `Unsupported receipt tool/version (expected CapGate ${TOOL_VERSION}).` };
   }
-  const canonical = canonicalJson(payload);
+  let canonical;
+  try {
+    canonical = canonicalJson(payload);
+  } catch {
+    // A structure too deep to serialize can never be a receipt we issued.
+    return { status: 'MALFORMED', changedFields: ['payload'], detail: 'Receipt is too deeply nested to verify.' };
+  }
   const expectedBody = sha256Hex(canonical);
   const expectedSig = hmacSha256Hex(receiptKey(payload), canonical);
   const changedFields = [];

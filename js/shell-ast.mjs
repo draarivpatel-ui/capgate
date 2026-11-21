@@ -21,31 +21,32 @@ export const WRAPPER_VALUE_FLAGS = new Map([
   ['env', new Set(['-u', '--unset', '-C', '--chdir'])],
   ['timeout', new Set(['-k', '--kill-after', '-s', '--signal'])],
   ['nice', new Set(['-n', '--adjustment'])],
-  ['ionice', new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid', '-t'])],
+  ['ionice', new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'])],
   ['stdbuf', new Set(['-i', '--input', '-o', '--output', '-e', '--error'])],
-  ['xargs', new Set(['-n', '--max-args', '-L', '--max-lines', '-P', '--max-procs', '-I', '--replace', '-d', '--delimiter', '-s', '--max-chars', '-a', '--arg-file', '-E', '--eof', '-e'])],
+  ['xargs', new Set(['-n', '--max-args', '-L', '--max-lines', '-P', '--max-procs', '-I', '--replace', '-d', '--delimiter', '-s', '--max-chars', '-a', '--arg-file', '-E', '--eof'])],
   ['exec', new Set(['-a'])],
   ['sudo', new Set(['-u', '--user', '-g', '--group', '-C', '--close-from', '-h', '--host', '-p', '--prompt', '-r', '--role', '-t', '--type'])],
-  ['unshare', new Set(['--map-user', '-R', '--setgroups'])],
-  ['nsenter', new Set(['-t', '--target', '-S', '--setuid', '--setgid', '-r', '--root', '-w', '--wd', '-e', '--env'])],
+  ['unshare', new Set(['--map-user', '--setgroups'])],
+  ['nsenter', new Set(['-t', '--target', '-S', '--setuid', '--setgid', '-r', '--root', '-w', '--wd'])],
   ['doas', new Set(['-u', '-C'])],
   ['pkexec', new Set()],
   ['run0', new Set(['--uid', '--gid'])],
-  ['setpriv', new Set(['--reuid', '--regid', '--groups', '--inh-caps', '--ambient-caps', '--bounding-set', '--selinux-label', '--apparmor-profile', '--seccomp', '--pdeathsig', '--ruid', '--euid', '--rgid', '--egid', '--reset-env'])],
+  ['setpriv', new Set(['--reuid', '--regid', '--groups', '--inh-caps', '--bounding-set', '--selinux-label', '--apparmor-profile', '--ruid', '--euid', '--rgid', '--egid'])],
   ['proxychains', new Set(['-f', '--config'])],
   ['proxychains4', new Set(['-f', '--config'])],
   ['tsocks', new Set()],
   ['taskset', new Set(['-c', '--cpu-list', '-p', '--pid'])],
   ['numactl', new Set(['--cpunodebind', '--membind', '--physcpubind', '--preferred', '-C', '-m'])],
-  ['chrt', new Set(['-m', '-p', '-R', '-P', '-T', '-D', '-N'])],
+  ['chrt', new Set(['-p', '-P', '-T', '-D', '-N'])],
   ['cpulimit', new Set(['-l', '--limit', '-i', '--interval'])],
-  ['watch', new Set(['-n', '--interval', '-d', '--differences', '-e', '--beep', '-b', '--beep', '-g', '--chgexit', '-x', '--exec', '-c', '--color', '-t', '--no-title', '-v', '--no-label', '--precise'])],
+  ['watch', new Set(['-n', '--interval'])],
   ['script', new Set(['-c', '--command', '--log-in', '--log-out', '--log-timing', '-T', '--log-timing'])],
-  ['flock', new Set(['-w', '--timeout', '-E', '--conflict-exit-code', '--fcntl', '-o', '--close', '-s', '--shared', '-x', '--exclusive', '-n', '--nb', '-u', '--unlock'])],
-  ['ssh-agent', new Set(['-a', '-t', '-k'])],
+  ['flock', new Set(['-w', '--timeout', '-E', '--conflict-exit-code', '--fcntl'])],
+  ['ssh-agent', new Set(['-a', '-t'])],
   ['firejail', new Set()],
   ['systemd-run', new Set(['--property', '-p', '--uid', '--gid', '--unit', '--description', '--slice', '--service-type', '--working-directory', '-d', '--setenv', '--pipe', '--expand-environment', '--file-system', '--namespace', '--machine', '-M', '--image', '--root-directory', '--root-prefix', '--image-policy', '--set-credential', '--set-credential-encrypted', '--ssh-key', '--ssh-authorized-keys', '--ssh-host-key', '--ssh-known-hosts', '--ssh-permit-root-login', '--ssh-permit-user-root-login', '--ssh-certificate', '--ssh-trusted-certificate-authority', '--ssh-revoke-certificate', '--selinux-apit-context', '--selinux-role', '--selinux-type', '--selinux-user', '--app-profile', '--apparmor-profile', '--smack-process-label', '--keyring-mode', '--timer-property', '--path-property', '--socket-property', '--mount-property', '--swap-property', '--device-property', '--automount-property', '--slice-property', '--scope-property', '--service-property', '--target', '--on-active', '--on-boot', '--on-startup', '--on-unit-active', '--on-unit-inactive', '--on-calendar', '--accuracy', '--randomized-delay', '--fixed-random-delay', '--nice', '--cpus-percentage', '--memory-max', '--tasks-max', '--timer-property'])],
   ['coproc', new Set()],
+  ['chroot', new Set(['--userspec', '--users', '--groups', '-u'])],
 ]);
 
 /** Wrappers that consume N leading operands (lock file, target dir, user) before the real command. */
@@ -190,6 +191,53 @@ export function decodeWord(raw) {
 }
 
 /**
+ * Decode the backslash escapes printf format strings and `echo -e` honor
+ * (`\xHH`, `\ooo`/`\0ooo`, `\n` and friends, `\\`, `\c` to terminate) so a
+ * payload piped into a shell can be analyzed as the code it becomes.
+ */
+function decodeFeederEscapes(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch !== '\\' || i + 1 >= s.length) {
+      out += ch;
+      continue;
+    }
+    const n = s[i + 1];
+    if (n === 'x') {
+      const m = /^[0-9a-fA-F]{1,2}/.exec(s.slice(i + 2));
+      if (m) {
+        out += String.fromCharCode(Number.parseInt(m[0], 16));
+        i += 1 + m[0].length;
+        continue;
+      }
+      out += 'x';
+      i += 1;
+      continue;
+    }
+    if (/[0-7]/.test(n)) {
+      const m = /^[0-7]{1,3}/.exec(s.slice(i + 1));
+      out += String.fromCharCode(Number.parseInt(m[0], 8) & 0xff);
+      i += m[0].length;
+      continue;
+    }
+    if (n === 'c') {
+      // printf \c terminates output here.
+      return out;
+    }
+    const simple = { n: '\n', t: '\t', r: '\r', b: '\b', a: '\x07', f: '\f', v: '\v', e: '\x1b', '\\': '\\' };
+    if (simple[n] !== undefined) {
+      out += simple[n];
+      i += 1;
+      continue;
+    }
+    out += n;
+    i += 1;
+  }
+  return out;
+}
+
+/**
  * Tokenizes a shell command string into statements separated by pipes/control ops,
  * while also extracting heredoc bodies and command substitutions.
  */
@@ -257,6 +305,17 @@ export function tokenizeShellLines(script) {
     // Backslash-newline line continuation
     if (ch === '\\' && text[i + 1] === '\n') {
       i += 2;
+      continue;
+    }
+
+    // Unquoted `$IFS` / `${IFS}` expand to the field-splitting characters
+    // (space, tab, newline), so they act as a word separator, not text.
+    // Modeling them as separators puts `cat$IFS/etc/passwd`'s real argument
+    // under the same inspection as the spaced form.
+    if (ch === '$' && (text.startsWith('${IFS}', i) ||
+        (text.startsWith('$IFS', i) && !/[A-Za-z0-9_]/.test(text[i + 4] || '')))) {
+      flush();
+      i += text.startsWith('${IFS}', i) ? 6 : 4;
       continue;
     }
 
@@ -372,12 +431,24 @@ export function tokenizeShellLines(script) {
       continue;
     }
 
-    // `{` and `}` are reserved words, not operators: they only group when they
-    // start a word. Mid-word braces are literal (`xargs -I{}`), so treating
-    // them as operators here would silently split the word apart.
-    if ((ch === '{' || ch === '}') && (hasToken || current !== '')) {
-      hasToken = true;
-      current += ch;
+    // `{` and `}` are reserved words only when they stand alone: a `{` glued
+    // to a word char is brace expansion (`{a,b}` -> `a` `b`), and a mid-word
+    // `}` is literal (`xargs -I{}`). Treating glued braces as operators would
+    // silently move the expanded words out of the owning command's argument
+    // list, so the path scan would never see them.
+    if (ch === '{' || ch === '}') {
+      const next = text[i + 1];
+      // `{`/`}` must be complete words to group: `{}` (xargs -I{}) and
+      // `{a,b}` expansions are literal, `{( ... )}` and `{ cmd;}` group.
+      const standalone = next === undefined || /[\s;|&()<>\n]/.test(next);
+      if (!standalone || hasToken || current !== '') {
+        hasToken = true;
+        current += ch;
+        i += 1;
+        continue;
+      }
+      flush();
+      tokens.push({ type: 'op', raw: ch, value: ch });
       i += 1;
       continue;
     }
@@ -597,6 +668,25 @@ function isAssignmentWord(raw) {
 }
 
 /**
+ * Keywords that open a compound statement or list: the words after them are
+ * the real command (`if x` evaluates x, `then x` runs the body, `! x`
+ * negates). Terminator words (`fi`, `done`, `esac`) strip to nothing; if
+ * anything follows them it is still inspected (fail closed).
+ */
+const KEYWORD_PREFIXES = new Set([
+  'if', 'elif', 'else', 'while', 'until', 'then', 'do',
+  'fi', 'done', 'esac', '!',
+]);
+
+/**
+ * Keywords whose segment is a spec, not a command: `for x in list`,
+ * `select x in list`, `case word in`, `function name`, and `[[` tests. The
+ * words stay as args so the gate can still path-scan the spec (`for i in
+ * /etc/*` should not silently pass), but nothing in the segment executes.
+ */
+const CONTROL_SPEC_WORDS = new Set(['for', 'select', 'case', 'function', '[[']);
+
+/**
  * Unwrap wrapper prefixes (`env`, `timeout`, `xargs`, `nohup`, etc.) and extract
  * inner command + shell `-c` script payload if present.
  */
@@ -604,9 +694,24 @@ function unwrapSegmentWords(words, segTokens) {
   let idx = 0;
   const chain = [];
   const extraScripts = [];
+  const envAssignments = [];
+  let envQuery = false;
 
   while (idx < words.length && isAssignmentWord(words[idx])) {
+    envAssignments.push(words[idx]);
     idx += 1;
+  }
+
+  // Structural keywords (`then rm x`, `while x`) prefix the real command and
+  // carry nothing themselves; without stripping them the keyword becomes a
+  // phantom unlisted command and the payload hides behind it.
+  while (idx < words.length && KEYWORD_PREFIXES.has(words[idx])) idx += 1;
+
+  // A spec segment (`for x in ...`, `[[ ... ]]`, `function name`) contains no
+  // command to dispatch on; its words still reach the gate as args so glob
+  // and path scans can judge them.
+  if (idx < words.length && (CONTROL_SPEC_WORDS.has(words[idx]) || words[words.length - 1] === ']]')) {
+    return { chain, command: '__control_spec__', args: words.slice(idx), nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
   }
 
   while (idx < words.length) {
@@ -621,6 +726,18 @@ function unwrapSegmentWords(words, segTokens) {
     while (idx < words.length) {
       const w = words[idx];
       if (cmd === 'env' && isAssignmentWord(w)) {
+        envAssignments.push(w);
+        idx += 1;
+        continue;
+      }
+      // `command -v rm` / `builtin -v x` are lookups, not dispatch: the word
+      // after the query flag is queried, never executed. Clusters containing
+      // v/V (`-pv`) count; `command -p rm` still dispatches rm.
+      if ((cmd === 'command' || cmd === 'builtin') && /^-[^\s-]*[vV]/.test(w)) {
+        return { chain, command: cmd, args: words.slice(idx + 1), nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
+      }
+      if (cmd === 'env' && (w === '--version' || w === '--help')) {
+        envQuery = true;
         idx += 1;
         continue;
       }
@@ -695,6 +812,11 @@ function unwrapSegmentWords(words, segTokens) {
   }
 
   const remaining = words.slice(idx);
+  // `env --version` / `env --help` answer and exit without running anything;
+  // the flag was seen inside the wrapper scan above.
+  if (envQuery) {
+    return { chain, command: '__env_query__', args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
+  }
   if (remaining.length === 0) {
     // A wrapper that consumed the whole line is not a no-op: bare `env` dumps
     // every environment variable, bare `xargs` re-runs buffered stdin as a
@@ -702,16 +824,16 @@ function unwrapSegmentWords(words, segTokens) {
     // rule on it instead of silently allowing.
     const bareCmd = chain.length > 0 ? chain[chain.length - 1] : null;
     if (bareCmd) {
-      return { chain, command: `__bare_${bareCmd}__`, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+      return { chain, command: `__bare_${bareCmd}__`, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
     }
     // Words were consumed as pure VAR=value assignments with no command
     // (`PATH=/tmp/evil` alone still mutates the environment the next call
     // inherits). Surface a marker so the gate audits the env channel instead
     // of silently dropping the segment.
     if (idx > 0) {
-      return { chain, command: '__env_only__', args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+      return { chain, command: '__env_only__', args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
     }
-    return { chain, command: null, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+    return { chain, command: null, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts, envAssignments };
   }
 
   const command = baseCommandName(remaining[0]);
@@ -720,6 +842,7 @@ function unwrapSegmentWords(words, segTokens) {
   let readsStdinAsCode = false;
   let stdinRedirectTarget = null;
   let scriptFile = null;
+  let startupScriptFile = null;
 
   // A `< file` redirect feeding program text to a shell or interpreter makes
   // that file the executed program regardless of other arguments.
@@ -776,24 +899,51 @@ function unwrapSegmentWords(words, segTokens) {
         break;
       }
       if (SHELL_LONG_VALUE_OPTIONS.has(opt)) {
+        // --rcfile/--init-file name a script the shell runs on startup:
+        // it is a code channel, not an inert option value.
+        if (j + 1 < args.length) startupScriptFile = args[j + 1];
         j += 1;
         continue;
       }
       if (opt.startsWith('--')) {
+        const eq = opt.indexOf('=');
+        if (eq > 0 && SHELL_LONG_VALUE_OPTIONS.has(opt.slice(0, eq))) {
+          startupScriptFile = opt.slice(eq + 1);
+        }
         continue;
+      }
+      // Glued `-c<payload>` (`bash -c'rm -rf /'` decodes to one word
+      // `-crm -rf /`): GNU getopt reads the rest of the word as the command.
+      if (opt.length > 2 && opt[0] === '-' && opt[1] === 'c') {
+        if (nestedScript === null) nestedScript = opt.slice(2);
+        seenDashC = true;
+        break;
       }
       if (/^-[A-Za-z]+$/.test(opt) || /^\+[A-Za-z]+$/.test(opt)) {
         const flags = opt.slice(1);
+        let stopCluster = false;
         for (let k = 0; k < flags.length; k++) {
           const f = flags[k];
           if (f === 'c' && opt.startsWith('-')) {
             seenDashC = true;
+            // A `c` mid-cluster consumes the cluster rest as its argument
+            // under GNU getopt (`bash -xcq` runs `q`); the first -c wins.
+            if (k < flags.length - 1 && nestedScript === null) {
+              nestedScript = flags.slice(k + 1);
+              stopCluster = true;
+            }
+            break;
           } else if (f === 's' && opt.startsWith('-')) {
             readsStdinAsCode = true;
-          } else if (SHELL_VALUE_OPTIONS.has(f) && k === flags.length - 1) {
-            j += 1;
+          } else if (SHELL_VALUE_OPTIONS.has(f)) {
+            // o/O consume the rest of their own word (`-onounset`) or, at
+            // cluster end, the next argv (`-o nounset`).
+            if (k < flags.length - 1) stopCluster = true;
+            else j += 1;
+            break;
           }
         }
+        if (stopCluster && nestedScript !== null) break;
         continue;
       }
       if (opt.startsWith('-') || opt.startsWith('+')) {
@@ -808,6 +958,9 @@ function unwrapSegmentWords(words, segTokens) {
         scriptFile = opt;
         break;
       }
+      // Words after the -c payload are positional parameters ($0, $1...),
+      // not options or commands.
+      break;
     }
     if (!seenDashC && !seenScriptFile) {
       readsStdinAsCode = true;
@@ -849,6 +1002,12 @@ function unwrapSegmentWords(words, segTokens) {
             isCmdFlag = true;
             break;
           }
+          // Long command flags also take `--flag=payload` (`fish --command=`).
+          if (cf.startsWith('--') && opt.startsWith(`${cf}=`)) {
+            nestedScript = opt.slice(cf.length + 1);
+            isCmdFlag = true;
+            break;
+          }
         }
         if (isCmdFlag) break;
         if (valFlags.has(opt)) {
@@ -870,7 +1029,36 @@ function unwrapSegmentWords(words, segTokens) {
     readsStdinAsCode = true;
   }
 
-  return { chain, command, args, nestedScript, readsStdinAsCode, stdinRedirectTarget, scriptFile, extraScripts };
+  return { chain, command, args, nestedScript, readsStdinAsCode, stdinRedirectTarget, scriptFile, startupScriptFile, extraScripts, envAssignments };
+}
+
+/**
+ * Redirect operators whose following word is a target path, not a command
+ * argument. `|&` is a pipe, `<<`/`<<<` carry their own token, and `&&`/`||`/`;`
+ * split segments: none belong here.
+ */
+const REDIRECT_TARGET_OPS = new Set(['<', '>', '>>', '>&', '<&', '<>', '>|', '&>', '&>>']);
+
+/**
+ * Split a pipeline segment into real argv words and redirect targets. The
+ * token stream keeps redirect targets as ordinary words; leaving them in
+ * argv lets `sh >o -c 'rm -rf /'` shift the payload past the -c flag parser.
+ * Targets are preserved separately so the gate can still path-check writes.
+ */
+function segmentWords(seg) {
+  const words = [];
+  const redirectTargets = [];
+  const toks = seg.tokens;
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t.type === 'op' && REDIRECT_TARGET_OPS.has(t.value)) {
+      const nx = toks[i + 1];
+      if (nx && nx.type === 'word') { redirectTargets.push(nx.value); i += 1; }
+      continue;
+    }
+    if (t.type === 'word') words.push(t.value);
+  }
+  return { words, redirectTargets };
 }
 
 /**
@@ -898,8 +1086,25 @@ export function analyzeShellAst(script, maxDepth = 6) {
 
     for (let sIdx = 0; sIdx < segments.length; sIdx++) {
       const seg = segments[sIdx];
-      const words = seg.tokens.filter((t) => t.type === 'word').map((t) => t.value);
-      if (words.length === 0) continue;
+      const { words, redirectTargets } = segmentWords(seg);
+      // `f()` / `f ()` opens a function definition: the single word before
+      // `(` is a name, not a command. Body segments still get inspected.
+      if (words.length === 1 && seg.opAfter === '(' && redirectTargets.length === 0) continue;
+      // `> file` alone is a redirect with no command: surface the targets so
+      // the gate can path-check them (truncate `> /etc/passwd` is not benign).
+      if (words.length === 0) {
+        if (redirectTargets.length > 0) {
+          records.push({
+            depth,
+            trail,
+            command: '__redirect_only__',
+            args: redirectTargets,
+            rawWords: [],
+            redirectTargets,
+          });
+        }
+        continue;
+      }
 
       const parsed = unwrapSegmentWords(words, seg.tokens);
       if (!parsed.command && parsed.extraScripts.length === 0) continue;
@@ -914,7 +1119,41 @@ export function analyzeShellAst(script, maxDepth = 6) {
           command: parsed.command,
           args: parsed.args,
           rawWords: words,
+          redirectTargets,
+          envAssignments: parsed.envAssignments,
+          startupScriptFile: parsed.startupScriptFile,
         });
+      }
+
+      // `find -exec cmd ... \;` (and -execdir/-ok/-okdir with `+`) hides a
+      // full command inside find's argument list; `find -delete` removes
+      // matched files outright. Both evade a plain command-name check.
+      if (parsed.command === 'find') {
+        const fargs = parsed.args || [];
+        for (let fi = 0; fi < fargs.length; fi++) {
+          const fa = fargs[fi];
+          if (fa === '-delete') {
+            records.push({
+              depth: depth + 1,
+              trail: [...fullTrail, '-delete'],
+              command: '__find_delete__',
+              args: [],
+              rawWords: words,
+            });
+          }
+          if (fa === '-exec' || fa === '-execdir' || fa === '-ok' || fa === '-okdir') {
+            let end = fi + 1;
+            const payload = [];
+            while (end < fargs.length && fargs[end] !== ';' && fargs[end] !== '+') {
+              payload.push(fargs[end]);
+              end += 1;
+            }
+            if (payload.length > 0) {
+              walk(payload.join(' '), depth + 1, [...fullTrail, fa]);
+            }
+            fi = end;
+          }
+        }
       }
 
       for (const extra of parsed.extraScripts) {
@@ -944,7 +1183,7 @@ export function analyzeShellAst(script, maxDepth = 6) {
           }
         } else {
           const prevSeg = segments[sIdx - 1];
-          const prevWords = prevSeg.tokens.filter((t) => t.type === 'word').map((t) => t.value);
+          const prevWords = segmentWords(prevSeg).words;
           const prevParsed = unwrapSegmentWords(prevWords, prevSeg.tokens);
           const feederCmd = prevParsed.command || prevWords[0] || '';
           if (feederCmd === 'echo' || feederCmd === 'printf') {
@@ -954,7 +1193,7 @@ export function analyzeShellAst(script, maxDepth = 6) {
               : prevParsed.args;
             let pipedScript = payloadArgs.join(' ');
             if (feederCmd === 'printf' || hasEchoEsc) {
-              pipedScript = pipedScript.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+              pipedScript = decodeFeederEscapes(pipedScript);
             }
             if (pipedScript.trim()) {
               heredocScripts.push(pipedScript);

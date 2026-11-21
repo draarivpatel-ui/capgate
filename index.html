@@ -33,7 +33,12 @@
         </button>
         <button type="button" id="btn-export-sarif" class="btn btn-secondary">Export SARIF</button>
         <button type="button" id="btn-export-receipt" class="btn btn-secondary">Export receipt</button>
+        <button type="button" id="btn-export-csv" class="btn btn-secondary">Export CSV</button>
+        <button type="button" id="btn-export-audit" class="btn btn-secondary">Export audit</button>
         <button type="button" id="btn-verify-receipt" class="btn btn-secondary">Verify receipt</button>
+        <button type="button" id="btn-kbd-toggle" class="btn btn-ghost" aria-pressed="true">
+          <span id="kbd-label">Keys on</span>
+        </button>
       </div>
     </div>
   </header>
@@ -73,7 +78,8 @@
             <span>Try your own bypass, verdict updates as you type</span>
             <textarea id="attack-editor" rows="2" spellcheck="false" aria-label="Edit the attack command"></textarea>
           </label>
-          <div class="attack-live" id="attack-live" aria-live="polite"></div>
+          <div class="attack-live" id="attack-live"></div>
+          <div id="attack-live-sr" class="sr-only" aria-live="polite"></div>
           <ol id="proof-trace" class="trace" aria-label="Decision trace"></ol>
         </article>
 

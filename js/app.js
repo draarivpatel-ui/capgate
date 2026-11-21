@@ -9,6 +9,8 @@ import { ADVERSARIAL_CORPUS } from './corpus.mjs';
 import { runCapGateBenchmark } from './benchmark.mjs';
 import { buildReceipt, verifyReceipt } from './receipt.mjs';
 import { canonicalJson, sha256Hex } from './hash.mjs';
+import { buildCorpusCsv, buildAuditJson } from './audit-export.mjs';
+import { shouldFireShortcut, SHORTCUT_MAP } from './shortcuts.mjs';
 import {
   DETECTORS,
   gaugeArc,
@@ -26,6 +28,7 @@ const state = {
   lastEval: null,
   lastBench: null,
   proofIds: [],
+  proofIdsAll: [],
   proofIndex: 0,
   proofFamily: 'All',
   attackCommand: '',
@@ -63,6 +66,10 @@ const els = {
   btnRunSuite: document.getElementById('btn-run-suite'),
   btnExportSarif: document.getElementById('btn-export-sarif'),
   btnExportReceipt: document.getElementById('btn-export-receipt'),
+  btnExportCsv: document.getElementById('btn-export-csv'),
+  btnExportAudit: document.getElementById('btn-export-audit'),
+  btnKbdToggle: document.getElementById('btn-kbd-toggle'),
+  kbdLabel: document.getElementById('kbd-label'),
   themeToggle: document.getElementById('theme-toggle'),
   themeLabel: document.getElementById('theme-label'),
   proofCommand: document.getElementById('proof-command'),
@@ -79,6 +86,7 @@ const els = {
   familyChips: document.getElementById('family-chips'),
   attackEditor: document.getElementById('attack-editor'),
   attackLive: document.getElementById('attack-live'),
+  attackLiveSr: document.getElementById('attack-live-sr'),
   btnVerifyReceipt: document.getElementById('btn-verify-receipt'),
   verifyInput: document.getElementById('verify-input'),
   btnVerifyRun: document.getElementById('btn-verify-run'),
@@ -112,7 +120,9 @@ function init() {
 
   const onPolicyChange = () => {
     state.policy.workspaceRoot = els.policyRoot.value.trim() || '/workspace/app';
-    state.policy.maxShellNestingDepth = Math.max(0, Math.min(6, Number(els.policyDepth.value || 2)));
+    const depthText = els.policyDepth.value.trim();
+    const depthNum = depthText === '' ? 2 : Number(depthText);
+    state.policy.maxShellNestingDepth = Number.isFinite(depthNum) ? Math.max(0, Math.min(6, depthNum)) : 2;
     state.policy.allowNetwork = els.policyNet.checked;
     state.policy.blockPrivateIps = els.policySsrf.checked;
     state.policy.allowEnvSecrets = els.policySecrets.checked;
@@ -148,6 +158,9 @@ function init() {
   els.btnRunSuite.addEventListener('click', renderBenchmark);
   els.btnExportSarif.addEventListener('click', exportSarif);
   els.btnExportReceipt.addEventListener('click', exportReceipt);
+  els.btnExportCsv.addEventListener('click', exportCsv);
+  els.btnExportAudit.addEventListener('click', exportAuditJson);
+  initShortcuts();
   els.btnVerifyReceipt.addEventListener('click', () => {
     els.verifyInput.focus();
     els.verifyInput.scrollIntoView({ block: 'center' });
@@ -260,6 +273,11 @@ function syncInspectorLabel() {
 }
 
 function renderCorpusList() {
+  // Rebuilding the list drops the focused button from the DOM; move focus to
+  // the same case afterwards so keyboard users keep their place.
+  const focusId = els.corpusList.contains(document.activeElement)
+    ? document.activeElement.dataset.caseId
+    : null;
   els.corpusList.textContent = '';
   const fam = els.familyFilter.value;
   let shown = 0;
@@ -279,6 +297,9 @@ function renderCorpusList() {
     els.corpusList.appendChild(btn);
   }
   els.corpusCount.textContent = String(shown);
+  if (focusId) {
+    els.corpusList.querySelector(`[data-case-id="${CSS.escape(focusId)}"]`)?.focus();
+  }
 }
 
 function evaluateAll() {
@@ -379,12 +400,12 @@ function renderProof() {
     { name: 'Keyword regex', hit: naive.blocked, why: naivedWhy(naive) },
     { name: 'First-word gate', hit: flat.blocked, why: 'only checks the first token' },
   ].filter((d) => !d.hit);
-  if (missed.length === 0) missed.push({ name: 'Both baselines', hit: false, why: 'flagged this call' });
+  if (missed.length === 0) missed.push({ name: 'Both baselines', verdict: 'BLOCK', why: 'flagged this call' });
   for (const d of missed) {
     const row = h('div', 'diff-row');
     row.append(
       h('strong', 'diff-who', d.name),
-      h('span', 'diff-what', 'ALLOW'),
+      h('span', 'diff-what', d.verdict || 'ALLOW'),
       h('span', 'diff-why', `${d.why}; CapGate fired ${rules}`),
     );
     els.heroDiffBody.appendChild(row);
@@ -417,41 +438,64 @@ function naivedWhy(naive) {
 }
 
 function renderFamilyChips() {
+  // The rebuild drops the focused chip; restore focus to the same family.
+  const focusFam = els.familyChips.contains(document.activeElement)
+    ? document.activeElement.dataset.family
+    : null;
   els.familyChips.textContent = '';
   const families = ['All', ...new Set(ADVERSARIAL_CORPUS.filter((c) => c.expectedBlocked).map((c) => c.category))];
   for (const fam of families) {
     const chip = h('button', `family-chip${state.proofFamily === fam ? ' active' : ''}`, fam);
     chip.type = 'button';
+    chip.dataset.family = fam;
     chip.setAttribute('aria-pressed', String(state.proofFamily === fam));
     chip.addEventListener('click', () => {
-      state.proofFamily = fam;
-      const ids = state.proofIds.filter((id) => {
+      // Filter the unfiltered proof set: switching families and returning to
+      // "All" must restore every case, not filter the already-filtered list.
+      const ids = state.proofIdsAll.filter((id) => {
         const c = ADVERSARIAL_CORPUS.find((x) => x.id === id);
         return c && (fam === 'All' || c.category === fam);
       });
-      if (ids.length) {
-        state.proofIds = ids;
-        state.proofIndex = 0;
-        renderProof();
-      }
+      if (!ids.length) return;
+      state.proofFamily = fam;
+      state.proofIds = ids;
+      state.proofIndex = 0;
+      renderProof();
     });
     els.familyChips.appendChild(chip);
   }
+  if (focusFam) {
+    els.familyChips.querySelector(`[data-family="${CSS.escape(focusFam)}"]`)?.focus();
+  }
+}
+
+let attackLiveTimer = 0;
+function announceAttackLive(text) {
+  // The verdict text re-renders on every keystroke; the screen-reader mirror
+  // only updates once typing pauses so announcements are not queued per char.
+  clearTimeout(attackLiveTimer);
+  attackLiveTimer = setTimeout(() => {
+    els.attackLiveSr.textContent = text;
+  }, 700);
 }
 
 function renderAttackLive() {
   const raw = state.attackCommand;
   if (!raw.trim()) {
-    els.attackLive.textContent = 'Type a command to see the live verdict.';
+    const text = 'Type a command to see the live verdict.';
+    els.attackLive.textContent = text;
     els.attackLive.dataset.state = 'allow';
+    announceAttackLive(text);
     return;
   }
   const item = ADVERSARIAL_CORPUS.find((c) => c.id === state.proofIds[state.proofIndex]);
   const tool = item?.toolCall?.tool || 'shell_exec';
   const argKey = { fs_read: 'path', fs_write: 'path', http_fetch: 'url', env_read: 'name' }[tool] || 'command';
   const ev = evaluateToolCall({ tool, args: { [argKey]: raw } }, state.policy);
-  els.attackLive.textContent = `${ev.decision} · ${ev.findingCount} finding${ev.findingCount === 1 ? '' : 's'} · risk ${ev.riskScore}/100 · ${ev.findings.slice(0, 2).map((f) => f.ruleId).join(', ') || 'no rule fired'}`;
+  const text = `${ev.decision} · ${ev.findingCount} finding${ev.findingCount === 1 ? '' : 's'} · risk ${ev.riskScore}/100 · ${ev.findings.slice(0, 2).map((f) => f.ruleId).join(', ') || 'no rule fired'}`;
+  els.attackLive.textContent = text;
   els.attackLive.dataset.state = ev.decision === 'ESCALATE' ? 'escalate' : ev.blocked ? 'deny' : 'allow';
+  announceAttackLive(text);
 }
 
 function renderScoreStrip(bench) {
@@ -481,6 +525,7 @@ function renderBenchmark() {
 
   let proofIds = proofCases(bench);
   if (!proofIds.length) proofIds = bench.rows.filter((r) => r.expectedBlocked).map((r) => r.id);
+  state.proofIdsAll = proofIds.slice();
   if (state.proofFamily !== 'All') {
     const filtered = proofIds.filter((id) => {
       const c = ADVERSARIAL_CORPUS.find((x) => x.id === id);
@@ -572,6 +617,73 @@ function exportReceipt() {
   triggerDownload('capgate-policy-receipt.json', JSON.stringify(receipt, null, 2), 'application/json');
 }
 
+function exportCsv() {
+  if (!state.lastBench) return;
+  triggerDownload('capgate-audit.csv', buildCorpusCsv(state.lastBench.rows), 'text/csv');
+}
+
+function exportAuditJson() {
+  if (!state.lastBench) return;
+  const doc = buildAuditJson({
+    policy: state.policy,
+    benchmark: state.lastBench,
+    toolCall: state.toolCall,
+    evaluation: state.lastEval,
+    generatedAt: new Date().toISOString(),
+  });
+  triggerDownload('capgate-audit.json', JSON.stringify(doc, null, 2), 'application/json');
+}
+
+/* Single-key shortcuts (WCAG 2.1.4) ------------------------------------- */
+
+function readStoredKbd() {
+  try {
+    return window.localStorage.getItem('capgate-kbd');
+  } catch {
+    return null;
+  }
+}
+
+function applyKbdEnabled(enabled) {
+  state.kbdShortcuts = enabled;
+  els.btnKbdToggle.setAttribute('aria-pressed', String(enabled));
+  els.kbdLabel.textContent = enabled ? 'Keys on' : 'Keys off';
+}
+
+function runShortcutAction(action) {
+  if (action === 'next-attack') {
+    els.btnProofNext.click();
+  } else if (action === 'inspect') {
+    els.btnProofInspect.click();
+  } else if (action === 'theme') {
+    els.themeToggle.click();
+  } else if (action === 'rerun') {
+    els.btnRunSuite.click();
+  } else if (action === 'export-receipt') {
+    exportReceipt();
+  }
+}
+
+function initShortcuts() {
+  applyKbdEnabled(readStoredKbd() !== 'off');
+  els.btnKbdToggle.addEventListener('click', () => {
+    const next = !state.kbdShortcuts;
+    applyKbdEnabled(next);
+    try {
+      window.localStorage.setItem('capgate-kbd', next ? 'on' : 'off');
+    } catch {
+      /* storage can be blocked; the toggle still works for this visit */
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (!shouldFireShortcut(ev, { enabled: state.kbdShortcuts })) return;
+    const action = SHORTCUT_MAP[ev.key.toLowerCase()];
+    if (!action) return;
+    ev.preventDefault();
+    runShortcutAction(action);
+  });
+}
+
 function runVerifyReceipt() {
   const raw = els.verifyInput.value.trim();
   els.verifyResult.textContent = '';
@@ -588,7 +700,14 @@ function runVerifyReceipt() {
     els.verifyResult.dataset.state = 'malformed';
     return;
   }
-  const result = verifyReceipt(parsed);
+  let result;
+  try {
+    result = verifyReceipt(parsed);
+  } catch {
+    els.verifyResult.textContent = 'MALFORMED: the receipt could not be verified.';
+    els.verifyResult.dataset.state = 'malformed';
+    return;
+  }
   els.verifyResult.textContent = `${result.status}${result.changedFields.length ? ` (${result.changedFields.join(', ')})` : ''}: ${result.detail}`;
   els.verifyResult.dataset.state = result.status.toLowerCase();
 }
@@ -602,7 +721,9 @@ function triggerDownload(filename, text, mime) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  // The download resolves asynchronously; revoking in the same task can cancel
+  // it in some engines.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 init();
