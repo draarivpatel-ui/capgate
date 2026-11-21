@@ -100,5 +100,8 @@ export function hmacSha256Hex(key, message) {
 export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  // Skip undefined-valued keys exactly like JSON.stringify does: leaving them
+  // in as null would make {a:undefined} and {a:null} collide to one digest,
+  // so a receipt for one payload would validate the other.
+  return `{${Object.keys(value).filter((k) => value[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
 }

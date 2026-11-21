@@ -23,14 +23,88 @@ export const WRAPPER_VALUE_FLAGS = new Map([
   ['nice', new Set(['-n', '--adjustment'])],
   ['ionice', new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid', '-t'])],
   ['stdbuf', new Set(['-i', '--input', '-o', '--output', '-e', '--error'])],
-  ['xargs', new Set(['-n', '--max-args', '-L', '--max-lines', '-P', '--max-procs', '-I', '--replace', '-d', '--delimiter', '-s', '--max-chars'])],
+  ['xargs', new Set(['-n', '--max-args', '-L', '--max-lines', '-P', '--max-procs', '-I', '--replace', '-d', '--delimiter', '-s', '--max-chars', '-a', '--arg-file', '-E', '--eof', '-e'])],
   ['exec', new Set(['-a'])],
   ['sudo', new Set(['-u', '--user', '-g', '--group', '-C', '--close-from', '-h', '--host', '-p', '--prompt', '-r', '--role', '-t', '--type'])],
+  ['unshare', new Set(['--map-user', '-R', '--setgroups'])],
+  ['nsenter', new Set(['-t', '--target', '-S', '--setuid', '--setgid', '-r', '--root', '-w', '--wd', '-e', '--env'])],
+  ['doas', new Set(['-u', '-C'])],
+  ['pkexec', new Set()],
+  ['run0', new Set(['--uid', '--gid'])],
+  ['setpriv', new Set(['--reuid', '--regid', '--groups', '--inh-caps', '--ambient-caps', '--bounding-set', '--selinux-label', '--apparmor-profile', '--seccomp', '--pdeathsig', '--ruid', '--euid', '--rgid', '--egid', '--reset-env'])],
+  ['proxychains', new Set(['-f', '--config'])],
+  ['proxychains4', new Set(['-f', '--config'])],
+  ['tsocks', new Set()],
+  ['taskset', new Set(['-c', '--cpu-list', '-p', '--pid'])],
+  ['numactl', new Set(['--cpunodebind', '--membind', '--physcpubind', '--preferred', '-C', '-m'])],
+  ['chrt', new Set(['-m', '-p', '-R', '-P', '-T', '-D', '-N'])],
+  ['cpulimit', new Set(['-l', '--limit', '-i', '--interval'])],
+  ['watch', new Set(['-n', '--interval', '-d', '--differences', '-e', '--beep', '-b', '--beep', '-g', '--chgexit', '-x', '--exec', '-c', '--color', '-t', '--no-title', '-v', '--no-label', '--precise'])],
+  ['script', new Set(['-c', '--command', '--log-in', '--log-out', '--log-timing', '-T', '--log-timing'])],
+  ['flock', new Set(['-w', '--timeout', '-E', '--conflict-exit-code', '--fcntl', '-o', '--close', '-s', '--shared', '-x', '--exclusive', '-n', '--nb', '-u', '--unlock'])],
+  ['ssh-agent', new Set(['-a', '-t', '-k'])],
+  ['firejail', new Set()],
+  ['systemd-run', new Set(['--property', '-p', '--uid', '--gid', '--unit', '--description', '--slice', '--service-type', '--working-directory', '-d', '--setenv', '--pipe', '--expand-environment', '--file-system', '--namespace', '--machine', '-M', '--image', '--root-directory', '--root-prefix', '--image-policy', '--set-credential', '--set-credential-encrypted', '--ssh-key', '--ssh-authorized-keys', '--ssh-host-key', '--ssh-known-hosts', '--ssh-permit-root-login', '--ssh-permit-user-root-login', '--ssh-certificate', '--ssh-trusted-certificate-authority', '--ssh-revoke-certificate', '--selinux-apit-context', '--selinux-role', '--selinux-type', '--selinux-user', '--app-profile', '--apparmor-profile', '--smack-process-label', '--keyring-mode', '--timer-property', '--path-property', '--socket-property', '--mount-property', '--swap-property', '--device-property', '--automount-property', '--slice-property', '--scope-property', '--service-property', '--target', '--on-active', '--on-boot', '--on-startup', '--on-unit-active', '--on-unit-inactive', '--on-calendar', '--accuracy', '--randomized-delay', '--fixed-random-delay', '--nice', '--cpus-percentage', '--memory-max', '--tasks-max', '--timer-property'])],
+  ['coproc', new Set()],
+]);
+
+/** Wrappers that consume N leading operands (lock file, target dir, user) before the real command. */
+export const WRAPPER_OPERAND_COUNT = new Map([
+  ['chroot', 1],
+  ['setuidgid', 1],
+  ['envuidgid', 1],
+  ['taskset', 1],
+  ['flock', 1],
+  ['repeat', 1],
 ]);
 
 export const SIMPLE_WRAPPERS = new Set([
   'env', 'nohup', 'setsid', 'timeout', 'nice', 'ionice', 'stdbuf',
   'time', 'command', 'builtin', 'exec', 'xargs', 'sudo',
+  'unshare', 'nsenter', 'doas', 'pkexec', 'run0', 'setpriv',
+  'linux32', 'linux64', 'eatmydata', 'proxychains', 'proxychains4',
+  'tsocks', 'daemon', 'chroot', 'setuidgid', 'envuidgid', 'taskset',
+  'numactl', 'chrt', 'cpulimit', 'busybox', 'toybox',
+  'flock', 'ssh-agent', 'firejail', 'systemd-run', 'coproc',
+  'noglob', 'nocorrect', 'repeat',
+]);
+
+/** Commands whose trailing words form one command string run via a shell. */
+const COMMAND_STRING_COMMANDS = new Set(['eval', 'watch']);
+
+/** Flags on shell-like interpreters whose value is itself program text. */
+const COMMAND_STRING_FLAGS = new Map([
+  ['fish', new Set(['-c', '-C', '--command'])],
+  ['yash', new Set(['-c'])],
+  ['osh', new Set(['-c'])],
+  ['oil', new Set(['-c'])],
+  ['elvish', new Set(['-c'])],
+]);
+
+/**
+ * Interpreters that take option values which must be skipped before the
+ * script-file argument is identified. Without this, `python3 -W ignore app.py`
+ * misreads `ignore` as the script and hides `app.py` from inspection.
+ */
+const INTERPRETER_VALUE_FLAGS = new Map([
+  ['python', new Set(['-W', '-X'])],
+  ['python2', new Set(['-W', '-X'])],
+  ['python3', new Set(['-W', '-X', '--check-hash-based-pycs'])],
+  ['node', new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '--conditions', '--title', '--report-filename', '--report-directory', '--redirect-warnings', '--heap-prof-dir', '--heap-prof-name', '--cpu-prof-dir', '--cpu-prof-name', '--diagnostic-dir', '--openssl-config', '--env-file', '--env-file-if-exists', '--test-reporter', '--test-reporter-destination', '--inspect-port', '--watch-path'])],
+  ['ruby', new Set(['-I', '-r', '-E', '-T', '-W', '-X', '--encoding', '--debug', '--verbose'])],
+  ['perl', new Set(['-I', '-M', '-D', '-F', '-x', '-X', '-C'])],
+  ['php', new Set(['-c', '-d'])],
+  ['lua', new Set()],
+  ['Rscript', new Set(['-f', '--file', '--encoding'])],
+  ['deno', new Set(['--cert', '--config', '--env', '--env-file', '--import-map', '--inspect', '--inspect-brk', '--inspect-wait', '--lock', '--log-level', '--reload', '--seed', '--v8-flags', '--watch', '--watch-fs', '--watch-hmr'])],
+  ['bun', new Set(['--preload', '--bunfile', '--conditions', '--cwd', '--define', '--env-file', '--extension-order', '--filter', '--hot', '--import', '--jsx', '--jsx-factory', '--jsx-fragment', '--jsx-import-source', '--loader', '--main-fields', '--port', '--target', '--tsconfig-override', '--watch'])],
+  ['jshell', new Set()],
+  ['ghci', new Set()],
+  ['fish', new Set(['--profile', '-p'])],
+  ['yash', new Set()],
+  ['osh', new Set()],
+  ['oil', new Set()],
+  ['elvish', new Set()],
 ]);
 
 export const SHELL_VALUE_OPTIONS = new Set(['o', 'O']);
@@ -265,14 +339,34 @@ export function tokenizeShellLines(script) {
     if (two === '<(' || two === '>(') {
       flush();
       const { segment, subBody, nextIdx } = readDollarParen(text, i);
-      substitutions.push(subBody);
+      substitutions.push({ body: subBody });
       tokens.push({ type: 'word', raw: segment, value: segment });
       i = nextIdx;
       continue;
     }
 
-    if (two === '&&' || two === '||' || two === '>>' || two === '2>') {
-      flush();
+    // Redirect operators that must not split the segment: `>&`, `<&`, `<>`,
+    // `>|`, `&>`, `&>>`, `|&`. An fd number immediately before them (`2>&1`,
+    // `0<file`) is part of the operator, not a command argument.
+    if (['>&', '<&', '<>', '>|', '&>', '&>>', '|&'].includes(two)) {
+      if (hasToken && /^[0-9]+$/.test(current)) {
+        current = '';
+        hasToken = false;
+      } else {
+        flush();
+      }
+      tokens.push({ type: 'op', raw: two, value: two });
+      i += 2;
+      continue;
+    }
+
+    if (two === '&&' || two === '||' || two === '>>') {
+      if (hasToken && /^[0-9]+$/.test(current)) {
+        current = '';
+        hasToken = false;
+      } else {
+        flush();
+      }
       tokens.push({ type: 'op', raw: two, value: two });
       i += 2;
       continue;
@@ -289,7 +383,14 @@ export function tokenizeShellLines(script) {
     }
 
     if (ch === '|' || ch === ';' || ch === '&' || ch === '(' || ch === ')' || ch === '{' || ch === '}' || ch === '<' || ch === '>') {
-      flush();
+      // A digit run immediately before a redirect char is an fd prefix
+      // (`2>file`, `0<file`), not a command word.
+      if ((ch === '<' || ch === '>') && hasToken && /^[0-9]+$/.test(current)) {
+        current = '';
+        hasToken = false;
+      } else {
+        flush();
+      }
       tokens.push({ type: 'op', raw: ch, value: ch });
       i += 1;
       continue;
@@ -343,16 +444,16 @@ export function tokenizeShellLines(script) {
           continue;
         }
         if (c === '$' && text[i + 1] === '(') {
-          const { segment, subBody, nextIdx } = readDollarParen(text, i);
+          const { segment, subBody, nextIdx, arith } = readDollarParen(text, i);
           current += segment;
-          substitutions.push(subBody);
+          substitutions.push({ body: subBody, arith });
           i = nextIdx;
           continue;
         }
         if (c === '`') {
           const { segment, subBody, nextIdx } = readBacktick(text, i);
           current += segment;
-          substitutions.push(subBody);
+          substitutions.push({ body: subBody });
           i = nextIdx;
           continue;
         }
@@ -366,9 +467,9 @@ export function tokenizeShellLines(script) {
     // Unquoted $(...) or `...`
     if (ch === '$' && text[i + 1] === '(') {
       hasToken = true;
-      const { segment, subBody, nextIdx } = readDollarParen(text, i);
+      const { segment, subBody, nextIdx, arith } = readDollarParen(text, i);
       current += segment;
-      substitutions.push(subBody);
+      substitutions.push({ body: subBody, arith });
       i = nextIdx;
       continue;
     }
@@ -376,7 +477,7 @@ export function tokenizeShellLines(script) {
       hasToken = true;
       const { segment, subBody, nextIdx } = readBacktick(text, i);
       current += segment;
-      substitutions.push(subBody);
+      substitutions.push({ body: subBody });
       i = nextIdx;
       continue;
     }
@@ -403,6 +504,10 @@ function readDollarParen(text, startIdx) {
   let i = startIdx + 2;
   let quote = null;
   const bodyStart = i;
+  // `$((expr))` is arithmetic expansion, not command substitution. It is
+  // still flagged when the body carries shell metacharacters, which is where
+  // a nested `$(cmd)` could hide.
+  const arith = text[startIdx + 2] === '(';
   while (i < text.length) {
     const c = text[i];
     if (quote === "'") {
@@ -420,6 +525,7 @@ function readDollarParen(text, startIdx) {
             segment: text.slice(startIdx, i + 1),
             subBody: text.slice(bodyStart, i),
             nextIdx: i + 1,
+            arith,
           };
         }
         depth -= 1;
@@ -431,6 +537,7 @@ function readDollarParen(text, startIdx) {
     segment: text.slice(startIdx),
     subBody: text.slice(bodyStart),
     nextIdx: text.length,
+    arith,
   };
 }
 
@@ -465,7 +572,7 @@ function splitPipelines(tokens) {
   const segments = [];
   let cur = [];
   for (const tok of tokens) {
-    if (tok.type === 'op' && ['|', '&&', '||', ';', '\n', '&'].includes(tok.value)) {
+    if (tok.type === 'op' && ['|', '|&', '&&', '||', ';', '\n', '&'].includes(tok.value)) {
       if (cur.length > 0) segments.push({ opAfter: tok.value, tokens: cur });
       cur = [];
     } else if (tok.type === 'op' && (tok.value === '(' || tok.value === ')' || tok.value === '{' || tok.value === '}')) {
@@ -517,29 +624,50 @@ function unwrapSegmentWords(words, segTokens) {
         idx += 1;
         continue;
       }
-      if (cmd === 'env' && (w === '-S' || w === '--split-string' || w.startsWith('--split-string=') || (w.startsWith('-S') && w.length > 2))) {
-        let splitVal = '';
-        if (w.startsWith('--split-string=')) {
-          splitVal = w.slice('--split-string='.length);
-          idx += 1;
-        } else if (w.startsWith('-S') && w.length > 2) {
-          splitVal = w.slice(2);
-          idx += 1;
-        } else {
+      if (cmd === 'env') {
+        // `env -S 'cmd args'` / `--split-string` re-splits one word into a
+        // full command line. Inside a short-option cluster, options that take
+        // a value (-u, -C) consume the rest of the cluster, so an `S` after
+        // them is their argument rather than the split flag.
+        let splitVal = null;
+        let consumed = 0;
+        if (w === '--split-string') {
           splitVal = words[idx + 1] ?? '';
-          idx += 2;
-        }
-        if (splitVal) {
-          const parsedSplit = tokenizeShellLines(splitVal);
-          const splitSegs = splitPipelines(parsedSplit.tokens);
-          if (splitSegs.length === 1 && parsedSplit.heredocBodies.length === 0 && parsedSplit.substitutions.length === 0) {
-            const splitWords = splitSegs[0].tokens.filter((t) => t.type === 'word').map((t) => t.value);
-            words = [...words.slice(0, idx), ...splitWords, ...words.slice(idx)];
-          } else {
-            extraScripts.push(splitVal);
+          consumed = 2;
+        } else if (w.startsWith('--split-string=')) {
+          splitVal = w.slice('--split-string='.length);
+          consumed = 1;
+        } else if (w.startsWith('-') && !w.startsWith('--') && w.length > 1) {
+          let sPos = -1;
+          for (let k = 1; k < w.length; k++) {
+            const ch = w[k];
+            if (ch === 'S') { sPos = k; break; }
+            if (ch === 'u' || ch === 'C') break;
+          }
+          if (sPos > 0) {
+            if (sPos < w.length - 1) {
+              splitVal = w.slice(sPos + 1);
+              consumed = 1;
+            } else {
+              splitVal = words[idx + 1] ?? '';
+              consumed = 2;
+            }
           }
         }
-        continue;
+        if (splitVal !== null) {
+          idx += consumed;
+          if (splitVal) {
+            const parsedSplit = tokenizeShellLines(splitVal);
+            const splitSegs = splitPipelines(parsedSplit.tokens);
+            if (splitSegs.length === 1 && parsedSplit.heredocBodies.length === 0 && parsedSplit.substitutions.length === 0) {
+              const splitWords = splitSegs[0].tokens.filter((t) => t.type === 'word').map((t) => t.value);
+              words = [...words.slice(0, idx), ...splitWords, ...words.slice(idx)];
+            } else {
+              extraScripts.push(splitVal);
+            }
+          }
+          continue;
+        }
       }
       if (w === '--') {
         idx += 1;
@@ -560,6 +688,10 @@ function unwrapSegmentWords(words, segTokens) {
       }
       break;
     }
+    // Wrappers like `chroot /jail cmd` or `setuidgid user cmd` take leading
+    // operands that are not the command.
+    const operands = WRAPPER_OPERAND_COUNT.get(cmd) || 0;
+    for (let k = 0; k < operands && idx < words.length; k++) idx += 1;
   }
 
   const remaining = words.slice(idx);
@@ -569,7 +701,17 @@ function unwrapSegmentWords(words, segTokens) {
     // command, bare `sudo` is still sudo. Surface a marker so the gate can
     // rule on it instead of silently allowing.
     const bareCmd = chain.length > 0 ? chain[chain.length - 1] : null;
-    return { chain, command: bareCmd ? `__bare_${bareCmd}__` : null, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+    if (bareCmd) {
+      return { chain, command: `__bare_${bareCmd}__`, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+    }
+    // Words were consumed as pure VAR=value assignments with no command
+    // (`PATH=/tmp/evil` alone still mutates the environment the next call
+    // inherits). Surface a marker so the gate audits the env channel instead
+    // of silently dropping the segment.
+    if (idx > 0) {
+      return { chain, command: '__env_only__', args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
+    }
+    return { chain, command: null, args: [], nestedScript: null, readsStdinAsCode: false, stdinRedirectTarget: null, scriptFile: null, extraScripts };
   }
 
   const command = baseCommandName(remaining[0]);
@@ -591,7 +733,40 @@ function unwrapSegmentWords(words, segTokens) {
     }
   }
 
-  if (SHELL_BINARIES.has(command)) {
+  if (COMMAND_STRING_COMMANDS.has(command)) {
+    // `eval 'a; b'` and `watch cmd args`: the trailing words are re-joined
+    // into one command line so blocked commands inside still fire.
+    const valFlags = WRAPPER_VALUE_FLAGS.get(command) || new Set();
+    const payload = [];
+    for (let j = 0; j < args.length; j++) {
+      const a = args[j];
+      if (a === '--') { payload.push(...args.slice(j + 1)); break; }
+      if (a.startsWith('-')) {
+        if (valFlags.has(a)) j += 1;
+        continue;
+      }
+      payload.push(a);
+    }
+    if (payload.length > 0) nestedScript = payload.join(' ');
+  } else if (command === 'script') {
+    // `script -c 'cmd' file` runs cmd under a typescript wrapper; without -c
+    // it spawns an interactive shell that reads the caller's stdin.
+    const valFlags = WRAPPER_VALUE_FLAGS.get('script') || new Set();
+    for (let j = 0; j < args.length; j++) {
+      const a = args[j];
+      if (a === '-c' || a === '--command') {
+        if (j + 1 < args.length) nestedScript = args[j + 1];
+        break;
+      }
+      if (a.startsWith('--command=')) {
+        nestedScript = a.slice('--command='.length);
+        break;
+      }
+      if (valFlags.has(a)) { j += 1; continue; }
+      if (a.startsWith('-')) continue;
+    }
+    if (nestedScript === null) readsStdinAsCode = true;
+  } else if (SHELL_BINARIES.has(command)) {
     let seenDashC = false;
     let seenScriptFile = false;
     for (let j = 0; j < args.length; j++) {
@@ -640,20 +815,59 @@ function unwrapSegmentWords(words, segTokens) {
   } else if (STDIN_INTERPRETERS.has(command)) {
     // An interpreter consumes program text from stdin when it has no script
     // file argument: `python3 -`, `python3 <<EOF`, `cat x | python3`,
-    // `python3 < script.py`. Flags and options never consume stdin.
+    // `python3 < script.py`. Option values must be skipped or a flag's
+    // argument is mistaken for the script file and the real one is hidden.
+    const valFlags = INTERPRETER_VALUE_FLAGS.get(command) || new Set();
+    const cmdFlags = COMMAND_STRING_FLAGS.get(command) || new Set();
     let sawScriptFile = false;
+    let endOfFlags = false;
     for (let j = 0; j < args.length; j++) {
       const opt = args[j];
+      if (endOfFlags) {
+        sawScriptFile = true;
+        scriptFile = opt;
+        break;
+      }
+      if (opt === '--') {
+        endOfFlags = true;
+        continue;
+      }
       if (opt === '-') {
         readsStdinAsCode = true;
         break;
       }
-      if (opt.startsWith('-')) continue;
+      if (opt.startsWith('-')) {
+        let isCmdFlag = false;
+        for (const cf of cmdFlags) {
+          if (opt === cf) {
+            if (j + 1 < args.length) nestedScript = args[j + 1];
+            isCmdFlag = true;
+            break;
+          }
+          if (!cf.startsWith('--') && opt.startsWith(cf) && opt.length > cf.length) {
+            nestedScript = opt.slice(cf.length);
+            isCmdFlag = true;
+            break;
+          }
+        }
+        if (isCmdFlag) break;
+        if (valFlags.has(opt)) {
+          j += 1;
+          continue;
+        }
+        continue;
+      }
       sawScriptFile = true;
       scriptFile = opt;
       break;
     }
-    if (!sawScriptFile) readsStdinAsCode = true;
+    if (!sawScriptFile && nestedScript === null) readsStdinAsCode = true;
+  }
+
+  // A script-file argument that names the process's own stdin stream means
+  // the program text arrives through the same channel as a bare interpreter.
+  if (scriptFile && /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/.test(scriptFile)) {
+    readsStdinAsCode = true;
   }
 
   return { chain, command, args, nestedScript, readsStdinAsCode, stdinRedirectTarget, scriptFile, extraScripts };
@@ -721,8 +935,8 @@ export function analyzeShellAst(script, maxDepth = 6) {
         }
       }
 
-      // Check pipeline feeder into stdin-reading shell (`cat <<EOF | bash`, `echo '...' | bash`, `cat script.sh | bash`)
-      if (sIdx > 0 && segments[sIdx - 1].opAfter === '|' && parsed.readsStdinAsCode) {
+      // Check pipeline feeder into stdin-reading shell (`cat <<EOF | bash`, `echo '...' | bash`, `cat script.sh | bash`, `|&`)
+      if (sIdx > 0 && ['|', '|&'].includes(segments[sIdx - 1].opAfter) && parsed.readsStdinAsCode) {
         if (heredocBodies.length > 0) {
           for (const hd of heredocBodies) {
             heredocScripts.push(hd.body);
@@ -787,7 +1001,10 @@ export function analyzeShellAst(script, maxDepth = 6) {
     }
 
     for (const sub of substitutions) {
-      walk(sub, depth + 1, [...trail, '$()']);
+      // `$((expr))` arithmetic expansion is not command execution; skip it
+      // unless the body hides shell metacharacters (a nested `$(cmd)`).
+      if (sub.arith && !/[$`;&|<>\n]/.test(sub.body)) continue;
+      walk(sub.body || '', depth + 1, [...trail, '$()']);
     }
   }
 

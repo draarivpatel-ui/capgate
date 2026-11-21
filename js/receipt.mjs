@@ -14,6 +14,9 @@ import { canonicalJson, sha256Hex, hmacSha256Hex } from './hash.mjs';
 
 export const TOOL_VERSION = '1.1.0';
 
+const DIGEST_ALGORITHM = 'SHA-256+HMAC-SHA256';
+const DIGEST_KEYS = new Set(['algorithm', 'canonicalJson', 'signature']);
+
 const COVERED_FIELDS = ['tool', 'version', 'policy', 'inspectedToolCall', 'evaluation', 'benchmark'];
 
 /** Deterministic key derived from the canonical covered payload. */
@@ -37,7 +40,7 @@ export function buildReceipt({ policy, toolCall, evaluation, benchmark }) {
   return {
     ...payload,
     digest: {
-      algorithm: 'SHA-256+HMAC-SHA256',
+      algorithm: DIGEST_ALGORITHM,
       canonicalJson: bodyHash,
       signature,
     },
@@ -52,6 +55,10 @@ export function verifyReceipt(receipt) {
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || !receipt.digest) {
     return { status: 'MALFORMED', changedFields: ['digest'], detail: 'Receipt has no digest object.' };
   }
+  const digest = receipt.digest;
+  if (typeof digest !== 'object' || Array.isArray(digest)) {
+    return { status: 'MALFORMED', changedFields: ['digest'], detail: 'Receipt digest is not an object.' };
+  }
   const payload = {};
   for (const field of COVERED_FIELDS) {
     if (field in receipt) payload[field] = receipt[field];
@@ -59,12 +66,34 @@ export function verifyReceipt(receipt) {
   if (!('tool' in payload) || !('version' in payload)) {
     return { status: 'MALFORMED', changedFields: ['tool', 'version'], detail: 'Receipt is missing required fields.' };
   }
+  // The receipt must claim to come from this tool at this version: a
+  // self-consistent signature over a different tool/version is a forgery.
+  // Report it as tampering with the covered identity fields, not as a
+  // structurally broken receipt.
+  const identityChanged = [];
+  if (payload.tool !== 'CapGate') identityChanged.push('tool');
+  if (payload.version !== TOOL_VERSION) identityChanged.push('version');
+  if (identityChanged.length) {
+    return { status: 'TAMPERED', changedFields: identityChanged, detail: `Unsupported receipt tool/version (expected CapGate ${TOOL_VERSION}).` };
+  }
   const canonical = canonicalJson(payload);
   const expectedBody = sha256Hex(canonical);
   const expectedSig = hmacSha256Hex(receiptKey(payload), canonical);
   const changedFields = [];
-  if (receipt.digest.canonicalJson !== expectedBody) changedFields.push('digest.canonicalJson');
-  if (receipt.digest.signature !== expectedSig) changedFields.push('digest.signature');
+  // Algorithm confusion: only the pinned construction may verify. Anything
+  // else (MD5, a bare hash, a swapped signature scheme) is tampering.
+  if (digest.algorithm !== DIGEST_ALGORITHM) changedFields.push('digest.algorithm');
+  if (typeof digest.canonicalJson !== 'string' || digest.canonicalJson !== expectedBody) {
+    changedFields.push('digest.canonicalJson');
+  }
+  if (typeof digest.signature !== 'string' || digest.signature !== expectedSig) {
+    changedFields.push('digest.signature');
+  }
+  // The digest object must carry exactly the signed triple: extra keys are
+  // unsigned data smuggled into a "verified" receipt.
+  for (const k of Object.keys(digest)) {
+    if (!DIGEST_KEYS.has(k)) changedFields.push(`unexpected:digest.${k}`);
+  }
 
   // Any field outside the signed covered set is unexpected and must be
   // reported: a receipt that carries extra data has been modified.
