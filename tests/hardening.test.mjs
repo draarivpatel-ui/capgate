@@ -117,9 +117,9 @@ test('version strings are unified across package, benchmark, SARIF and receipt',
   const pkg = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const bench = runCapGateBenchmark();
   const sarif = buildSarifReport(bench.rows);
-  assert.equal(pkg.version, '1.1.0');
-  assert.equal(bench.version, '1.1.0');
-  assert.equal(sarif.runs[0].tool.driver.version, '1.1.0');
+  assert.equal(pkg.version, '1.2.0');
+  assert.equal(bench.version, '1.2.0');
+  assert.equal(sarif.runs[0].tool.driver.version, '1.2.0');
 });
 
 /* ---------- Wave 2 hardening: fresh cross-model bypass classes ---------- */

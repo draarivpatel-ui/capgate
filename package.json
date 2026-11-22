@@ -1,6 +1,6 @@
 {
   "name": "capgate",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "CapGate: deterministic agent tool-call capability firewall, recursive shell AST unwrapper, and adversarial bypass benchmark workbench.",
   "type": "module",

@@ -89,6 +89,82 @@
       <div id="proof-score" class="scorestrip"></div>
     </section>
 
+    <section class="panel lab-panel" id="attack-lab" aria-labelledby="lab-heading" data-deploy="attack-lab-v1">
+      <div class="panel-head">
+        <h2 id="lab-heading" class="section-title">Attack-chain lab</h2>
+        <div class="bench-actions">
+          <button type="button" id="lab-btn-report-json" class="btn btn-secondary">Report JSON</button>
+          <button type="button" id="lab-btn-report-csv" class="btn btn-secondary">Report CSV</button>
+          <button type="button" id="lab-btn-report-md" class="btn btn-secondary">Report MD</button>
+          <button type="button" id="lab-btn-copy-link" class="btn btn-ghost">Copy link</button>
+        </div>
+      </div>
+      <p class="lab-intro">Six deterministic attack chains run against five selectable capability policies. Every step is a real tool call judged by the same engine as the inspector; the only lab-level control is the per-chain call budget.</p>
+
+      <div id="lab-policy-cards" class="lab-policy-cards" role="group" aria-label="Select a capability policy"></div>
+
+      <div class="kpi-strip lab-metrics">
+        <div class="kpi-card">
+          <span class="kpi-label">Blocked chains</span>
+          <strong id="lab-metric-blocked" class="kpi-value">-</strong>
+          <span id="lab-metric-blocked-sub" class="kpi-foot">-</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Residual attack surface</span>
+          <strong id="lab-metric-residual" class="kpi-value">-</strong>
+          <span class="kpi-foot">sink-weighted reachability, 0 is tightest</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-label">Least-privilege tightness</span>
+          <strong id="lab-metric-tight" class="kpi-value">-</strong>
+          <span id="lab-metric-tight-sub" class="kpi-foot">-</span>
+        </div>
+      </div>
+
+      <div id="lab-chain-grid" class="lab-chain-grid"></div>
+
+      <div class="lab-compare">
+        <label class="field lab-compare-field">
+          <span>Diff against policy</span>
+          <select id="lab-compare-select"></select>
+        </label>
+        <label class="field lab-compare-field">
+          <span>Chain overlay on the lattice</span>
+          <select id="lab-chain-select"></select>
+        </label>
+      </div>
+      <div class="matrix-scroll">
+        <div id="lab-diff-matrix" class="lab-diff" role="table" aria-label="Policy diff matrix"></div>
+      </div>
+
+      <h3 class="sub-title">Capability lattice</h3>
+      <div class="matrix-scroll lattice-scroll">
+        <svg id="lab-lattice" viewBox="0 0 780 430" role="img" aria-label="Capability lattice: agent, tool grants and sensitive sinks"></svg>
+      </div>
+      <div id="lab-legend" class="lab-legend"></div>
+
+      <div class="lab-selftest">
+        <div class="panel-head">
+          <h3 class="sub-title">In-page self-tests</h3>
+          <button type="button" id="lab-btn-selftests" class="btn btn-primary">Run Self-Tests</button>
+        </div>
+        <p id="lab-selftest-status" class="muted" aria-live="polite">Not run yet.</p>
+        <ol id="lab-selftest-list" class="lab-selftest-list"></ol>
+      </div>
+
+      <div class="lab-verify">
+        <h3 class="sub-title">Report integrity check</h3>
+        <label class="field">
+          <span>Policy report JSON</span>
+          <textarea id="lab-verify-input" rows="5" spellcheck="false" aria-label="Policy report JSON to verify"></textarea>
+        </label>
+        <div class="verify-actions">
+          <button type="button" id="lab-btn-verify-report" class="btn btn-primary">Verify report</button>
+          <span id="lab-verify-result" class="verify-result" aria-live="polite"></span>
+        </div>
+      </div>
+    </section>
+
     <section class="workspace" aria-label="Tool-call inspector and policy">
       <aside class="panel left-rail" aria-label="Capability policy and corpus">
         <section class="rail-section">
@@ -241,5 +317,6 @@
   </footer>
 
   <script type="module" src="js/app.js"></script>
+  <script type="module" src="js/lab.js"></script>
 </body>
 </html>

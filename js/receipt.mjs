@@ -12,7 +12,7 @@
 
 import { canonicalJson, sha256Hex, hmacSha256Hex } from './hash.mjs';
 
-export const TOOL_VERSION = '1.1.0';
+export const TOOL_VERSION = '1.2.0';
 
 const DIGEST_ALGORITHM = 'SHA-256+HMAC-SHA256';
 const DIGEST_KEYS = new Set(['algorithm', 'canonicalJson', 'signature']);

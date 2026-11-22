@@ -24,6 +24,12 @@ The top of the page cycles through the 13 attacks in the corpus that both baseli
 - **Benchmark board:** one card per detector with recall, precision, F1 and false positive rate bars and a confusion matrix, and a family by detector grid of correct verdicts.
 - **Live attack editor:** type any command in the hero and watch the verdict, risk score and firing rules update as you type. Family chips jump to a class of hidden attack.
 - **Policy-diff explainer:** for every proof case, the hero shows which baseline allowed the attack and which CapGate rule caught it.
+- **Attack-chain and policy hardening lab:** six deterministic attack chains (indirect prompt injection to secret read plus HTTP exfiltration, read-only to write-config to exec escalation, path traversal and symlink escape, confused-deputy cross-tenant leak, runaway recursive tool-call budget, obfuscated shell metacharacter and env exfiltration) run against five selectable capability presets: Unrestricted Default, Read-Only + Egress Deny, Least-Privilege Scoped Token, Human-in-the-Loop Approval Gate, and Strict Zero-Trust Sandbox. Each preset is a real policy object fed to the same `evaluateToolCall` engine the inspector uses, so chain steps halt on real findings. The board reports blocked chains, a residual attack-surface score, least-privilege tightness across 13 capability dimensions, and a policy diff matrix comparing any two presets.
+- **Capability-lattice visualizer:** an SVG lattice from Agent through tool grants to the sensitive sinks (filesystem, network, secrets, shell). Edges are classified open, held, or blocked from live evaluations, and selecting an attack chain overlays the traversed path and the edge where it was halted.
+- **Policy audit reports:** a SHA-256 fingerprinted JSON policy report (honestly labeled unkeyed tamper evidence, not a signature), a formula-safe CSV of chain steps, and a Markdown report. A paste-in verifier replays the canonical digest and reports VALID or TAMPERED.
+- **URL-hash bookmarking:** `#cap=<preset>[.<chain>][.vs.<preset>]` encodes the lab selection; malformed hashes fail closed to the default preset.
+- **In-page self-tests:** a Run Self-Tests panel executes deterministic checks in the browser: default-deny fail-closed, policy monotonicity under every tightening transform, path-traversal canonicalization, CSV formula escaping, tamper detection, and FIPS 180-4 SHA-256 known-answer vectors.
+- **Tightening monotonicity:** every preset-to-preset tightening and each of the 13 single-dimension tightenings is checked so no chain a policy blocks becomes allowed under the stricter policy; all 15 transformations hold in tests.
 - **Verifiable receipts:** SARIF 2.1.0 for the whole corpus, plus a policy receipt with a canonical SHA-256 digest and integrity signature. Paste a receipt into the verify panel to see VALID or TAMPERED with the changed field.
 - **Audit exports:** a formula-safe CSV of the corpus rows (no cell can execute as a spreadsheet formula) and a SHA-256 fingerprinted JSON audit document whose canonical hash re-verifies against any edit.
 - **Single-key shortcuts:** `n` next attack, `i` open in inspector, `t` theme, `r` rerun benchmark, `e` export receipt. They never fire with a modifier held or while a control accepts text, and a "Keys" toggle in the header switches them off (WCAG 2.1.4).
@@ -61,13 +67,14 @@ Read these numbers for what they are. The corpus was written by the same author 
 - Shell syntax is large, and constructs the parser does not model can hide a command.
 - The 36-case corpus is small and was not written by an independent red team.
 - Receipts are tamper-evident: any edit to the covered fields breaks the canonical SHA-256 and the derived integrity signature. The key is derived from the receipt payload itself, so this proves integrity against accidental or casual tampering, not authenticity against a party that can rewrite the whole artifact.
+- The attack-lab chains are deterministic simulations: every step is judged by the real engine, but the steps, sinks and presets are authored, and the Human-in-the-Loop preset models approval as a hold, not an interactive decision. Policy report digests are unkeyed SHA-256 tamper evidence; an attacker who rewrites the report can also recompute the digest.
 
 ## Run it and test it
 
 Node 18 or newer, nothing to install.
 
 ```bash
-npm test                 # 246 tests: shell parser, capability gate, hardening, receipts, exports, shortcuts, page checks
+npm test                 # 551 tests: shell parser, capability gate, hardening, receipts, exports, shortcuts, page checks, attack lab, lattice, policy reports, self-tests
 npm run eval             # benchmark table
 npm run eval:check       # fails if CapGate drops below F1 0.98, gains a false positive, or stops beating both baselines
 npm run eval:json        # full report with every row
@@ -80,10 +87,15 @@ python3 -m http.server   # then open http://localhost:8000/
 | `js/capability-gate.mjs` | Policy, rules, deny-by-default, normalization, baselines, SARIF export |
 | `js/hash.mjs`, `js/receipt.mjs` | Dependency-free SHA-256 / HMAC and canonical tamper-evident receipts |
 | `js/audit-export.mjs` | Formula-safe CSV export and SHA-256 fingerprinted JSON audit document |
+| `js/attack-lab.mjs` | Five capability presets, six attack chains, chain runner, tightness and residual-surface scores, policy diffs, tightening transforms and the monotonicity check |
+| `js/lattice-view.mjs` | Capability-lattice geometry, edge classification and attack-chain overlay model for the SVG |
+| `js/policy-report.mjs` | Checksummed JSON / CSV / Markdown policy-audit reports, report verifier, and `#cap=` URL-hash encode/decode |
+| `js/self-tests.mjs` | The deterministic in-page self-test runner (fail-closed, monotonicity, canonicalization, CSV escaping, tamper detection, SHA-256 vectors) |
 | `js/shortcuts.mjs` | WCAG 2.1.4 single-key shortcut guards and key map |
 | `js/corpus.mjs`, `js/benchmark.mjs` | The 36 cases and the scoring |
 | `js/viewmodel.mjs` | Pure models for the trace, gauge, verdicts, detector cards and family grid |
 | `js/app.js` | Page controller; live attack editor, policy diff, receipt verify; text via `textContent` |
+| `js/lab.js` | Attack-lab controller; preset cards, chain grid, diff matrix, lattice SVG, self-test panel, report export and verify |
 | `video/` | Demo walkthrough steps and narration |
 
 ## License

@@ -19,7 +19,18 @@ export const DEFAULT_POLICY = Object.freeze({
   allowEnvSecrets: false,
   allowInlineCode: false,
   maxShellNestingDepth: 2,
+  grantedTools: ['fs_read', 'fs_write', 'http_fetch', 'env_read', 'shell_exec'],
+  allowFsWrite: true,
+  enforceWorkspaceBoundary: true,
+  blockSensitivePaths: true,
+  requireHumanApproval: false,
 });
+
+/**
+ * The five agent tools the firewall knows how to inspect. A policy may grant a
+ * subset through `grantedTools`; calls to ungranted tools are denied.
+ */
+export const GRANTABLE_TOOLS = Object.freeze([...DEFAULT_POLICY.grantedTools]);
 
 const SENSITIVE_PATH_PATTERNS = [
   /(^|\/)\.env(\.|$)/i,
@@ -1035,6 +1046,7 @@ function sanitizePolicy(merged) {
     blockedCommands: asStringArray(merged.blockedCommands, DEFAULT_POLICY.blockedCommands),
     networkCommands: asStringArray(merged.networkCommands, DEFAULT_POLICY.networkCommands),
     allowedDomains: asStringArray(merged.allowedDomains, DEFAULT_POLICY.allowedDomains),
+    grantedTools: asStringArray(merged.grantedTools, DEFAULT_POLICY.grantedTools),
     maxShellNestingDepth: Number.isFinite(depth) && depth >= 0 ? Math.min(depth, 12) : DEFAULT_POLICY.maxShellNestingDepth,
   };
 }
@@ -1056,7 +1068,7 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
     findings.push({ ruleId, severity, title, detail, trail, suggestion });
   };
 
-  const KNOWN_TOOLS = new Set(['fs_read', 'fs_write', 'http_fetch', 'env_read', 'shell_exec']);
+  const KNOWN_TOOLS = new Set(GRANTABLE_TOOLS);
   const tool = String(toolCall?.tool || '');
   const args = toolCall?.args || {};
 
@@ -1069,6 +1081,12 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
     addFinding('CAP-POLICY-00', 'critical', `Unrecognised tool "${tool}" blocked by deny-by-default`,
       `Tool "${tool}" is not one of the guarded tools (${[...KNOWN_TOOLS].join(', ')}).`,
       [tool], 'Register the tool with a capability policy or remove it from the agent toolset.');
+  } else if (!new Set(policy.grantedTools).has(tool)) {
+    // Capability grants: a tool the policy does not grant is denied even when
+    // the call itself would otherwise pass every content rule.
+    addFinding('CAP-POLICY-02', 'critical', `Tool "${tool}" is not granted by this policy`,
+      `The grant list covers [${policy.grantedTools.join(', ') || 'nothing'}]; "${tool}" calls sit outside the grant.`,
+      [tool], 'Grant the tool explicitly in grantedTools or remove it from the agent toolset.');
   } else {
     // Required argument present? An empty required arg is an escalation, never a silent ALLOW.
     const required = { fs_read: 'path', fs_write: 'path', http_fetch: 'url', env_read: 'name', shell_exec: 'command' }[tool];
@@ -1081,6 +1099,11 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
   }
 
   if (tool === 'fs_read' || tool === 'fs_write') {
+    if (tool === 'fs_write' && policy.allowFsWrite === false) {
+      addFinding('CAP-POLICY-03', 'high', 'File-write capability is not granted',
+        'Policy allowFsWrite=false removes every filesystem write; the agent is read-only.',
+        [tool], 'Grant write capability explicitly, or keep the agent on a read-only grant.');
+    }
     const targetPath = String(args.path || '');
     if (hasTraversalSegment(targetPath)) {
       addFinding('CAP-PATH-01', 'critical', 'Directory traversal component in file tool argument',
@@ -1940,15 +1963,39 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
     }
   }
 
-  const hasCritical = deduped.some((f) => f.severity === 'critical');
-  const hasHigh = deduped.some((f) => f.severity === 'high');
-  const hasMedium = deduped.some((f) => f.severity === 'medium');
+  // Policy-configured guard families. Each flag defaults to the secure value,
+  // so only an explicit opt-out disables a family of checks. An unrestricted
+  // baseline preset uses this to measure what the engine catches when a
+  // deployer turns the boundary and sensitive-path guards off entirely.
+  const governed = deduped.filter((f) => {
+    if (policy.enforceWorkspaceBoundary === false && /^CAP-PATH-\d+$/.test(f.ruleId)) return false;
+    if (policy.blockSensitivePaths === false && f.ruleId === 'CAP-SECRET-01') return false;
+    return true;
+  });
+
+  // Human-in-the-loop approval gate: every recognised call is held for review
+  // instead of running autonomously. The hold is a medium finding, so a call
+  // that is already denied on content still reports DENY, not ESCALATE.
+  if (policy.requireHumanApproval === true && KNOWN_TOOLS.has(tool)) {
+    governed.push({
+      ruleId: 'CAP-POLICY-04',
+      severity: 'medium',
+      title: `Call held for human approval (${tool})`,
+      detail: 'Policy requireHumanApproval routes every tool call through an approval gate before it may run.',
+      trail: [tool],
+      suggestion: 'Approve or reject the held call in the review queue.',
+    });
+  }
+
+  const hasCritical = governed.some((f) => f.severity === 'critical');
+  const hasHigh = governed.some((f) => f.severity === 'high');
+  const hasMedium = governed.some((f) => f.severity === 'medium');
 
   let decision = 'ALLOW';
   if (hasCritical || hasHigh) decision = 'DENY';
   else if (hasMedium) decision = 'ESCALATE';
 
-  const riskScore = Math.min(100, deduped.reduce((sum, f) => (
+  const riskScore = Math.min(100, governed.reduce((sum, f) => (
     sum + (f.severity === 'critical' ? 45 : f.severity === 'high' ? 30 : 15)
   ), 0));
 
@@ -1957,10 +2004,10 @@ export function evaluateToolCall(toolCall, policyInput = DEFAULT_POLICY) {
     decision,
     blocked: decision !== 'ALLOW',
     riskScore,
-    findingCount: deduped.length,
-    findings: deduped,
+    findingCount: governed.length,
+    findings: governed,
     ast,
-    safeRewrite: synthesizeSafeRewrite(toolCall, deduped, policy),
+    safeRewrite: synthesizeSafeRewrite(toolCall, governed, policy),
   };
 }
 
@@ -2365,7 +2412,7 @@ export function buildSarifReport(caseEvaluations) {
       tool: {
         driver: {
           name: 'CapGate',
-          version: '1.1.0',
+          version: '1.2.0',
           informationUri: 'https://github.com/draarivpatel-ui/capgate',
           rules,
         },

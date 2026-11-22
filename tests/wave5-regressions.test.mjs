@@ -38,7 +38,7 @@ test('verifyReceipt returns MALFORMED (not a crash) on deeply nested receipts', 
   let deep = { a: 1 };
   for (let i = 0; i < 4000; i++) deep = { a: deep };
   const fake = {
-    tool: 'CapGate', version: '1.1.0', policy: deep,
+    tool: 'CapGate', version: '1.2.0', policy: deep,
     digest: { algorithm: 'a', canonicalJson: 'b', signature: 'c' },
   };
   const res = verifyReceipt(fake);
