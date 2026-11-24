@@ -574,8 +574,16 @@ export function hostCandidatesFromArg(arg) {
     }
   }
   // Bracketed IPv6 literal, possibly with port or path.
-  const v6 = /^\[([0-9a-fA-F:.%]+)\]/.exec(s);
+  const v6 = /^\[([^\]]+)\]/.exec(s);
   if (v6) { out.push(`[${v6[1]}]`); return out; }
+  // Bare IPv6 literals are legal ssh/dig destinations even without brackets.
+  // Zone ids (`%eth0`) ride at the end and are stripped before parsing.
+  const bareV6 = s.split('/')[0];
+  const bareV6NoZone = bareV6.replace(/%[A-Za-z0-9_.~-]+$/, '');
+  if (/^[0-9a-fA-F:.]+$/.test(bareV6NoZone) && bareV6NoZone.includes(':') && parseIpv6Hextets(bareV6NoZone)) {
+    out.push(bareV6);
+    return out;
+  }
   // Bare dotted IPv4 or DNS name: take up to the first '/', whitespace, or port.
   const bare = /^[^\s/?#]+/.exec(s)?.[0] || '';
   if (bare && !bare.startsWith('.')) {

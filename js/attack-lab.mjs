@@ -428,7 +428,7 @@ export function policyTightness(policy = DEFAULT_POLICY) {
     },
     {
       id: 'cmdallowlist', name: 'Command allowlist narrow', max: 4,
-      earned: allowed === 0 ? 0 : allowed <= 12 ? 4 : allowed <= 16 ? 3 : allowed <= 20 ? 2 : allowed <= 30 ? 1 : 0,
+      earned: allowed === 0 ? 4 : allowed <= 12 ? 4 : allowed <= 16 ? 3 : allowed <= 20 ? 2 : allowed <= 30 ? 1 : 0,
     },
   ];
   const score = dimensions.reduce((s, d) => s + d.earned, 0);

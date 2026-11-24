@@ -104,21 +104,31 @@ export function hmacSha256Hex(key, message) {
  * the same value. A depth cap turns hostile deeply-nested input into a thrown
  * error instead of a stack overflow.
  */
-export function canonicalJson(value, depth = 0) {
+function canonicalJsonValue(value, depth) {
   if (depth > 256) throw new Error('canonicalJson: value nested too deeply');
   if (value && typeof value === 'object' && typeof value.toJSON === 'function') {
-    return canonicalJson(value.toJSON(), depth + 1);
+    return canonicalJsonValue(value.toJSON(), depth + 1);
+  }
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+    return undefined;
   }
   if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value ?? null) ?? 'null';
+    return JSON.stringify(value);
   }
-  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v, depth + 1)).join(',')}]`;
-  // Skip undefined/function/symbol-valued keys exactly like JSON.stringify
-  // does: leaving them in would make {a:undefined} and {a:null} collide to one
-  // digest, so a receipt for one payload would validate the other.
-  const keys = Object.keys(value).filter((k) => {
-    const v = value[k];
-    return v !== undefined && typeof v !== 'function' && typeof v !== 'symbol';
-  });
-  return `{${keys.sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k], depth + 1)}`).join(',')}}`;
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => canonicalJsonValue(v, depth + 1) ?? 'null').join(',')}]`;
+  }
+  // Undefined/function/symbol-valued keys drop exactly like JSON.stringify;
+  // in arrays those same values become null. Evaluate each value once so the
+  // object/array contexts cannot diverge.
+  const entries = [];
+  for (const k of Object.keys(value).sort()) {
+    const encoded = canonicalJsonValue(value[k], depth + 1);
+    if (encoded !== undefined) entries.push(`${JSON.stringify(k)}:${encoded}`);
+  }
+  return `{${entries.join(',')}}`;
+}
+
+export function canonicalJson(value, depth = 0) {
+  return canonicalJsonValue(value, depth) ?? 'null';
 }

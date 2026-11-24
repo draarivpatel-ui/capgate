@@ -127,6 +127,9 @@ function renderChains() {
   for (const res of state.lab.results) {
     const card = h('article', `lab-chain${res.chainId === state.chainId ? ' active' : ''}`);
     card.dataset.chain = res.chainId;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-pressed', String(res.chainId === state.chainId));
     const head = h('div', 'lab-chain-head');
     head.append(
       h('h3', 'lab-chain-title', res.title),
@@ -154,11 +157,18 @@ function renderChains() {
       steps.appendChild(li);
     }
     card.append(head, h('p', 'lab-chain-narr', res.blocked ? detail : `OPEN: ${detail}`), steps);
-    card.addEventListener('click', () => {
+    const activateCard = () => {
       state.chainId = res.chainId;
       renderLattice();
       renderChainSelection();
       writeHash();
+    };
+    card.addEventListener('click', activateCard);
+    card.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        activateCard();
+      }
     });
     els.chainGrid.appendChild(card);
   }
@@ -166,7 +176,9 @@ function renderChains() {
 
 function renderChainSelection() {
   for (const card of els.chainGrid.children) {
-    card.classList.toggle('active', card.dataset.chain === state.chainId);
+    const active = card.dataset.chain === state.chainId;
+    card.classList.toggle('active', active);
+    card.setAttribute('aria-pressed', String(active));
   }
   if (els.chainSelect.value !== state.chainId) els.chainSelect.value = state.chainId;
 }
