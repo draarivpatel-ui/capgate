@@ -1547,15 +1547,6 @@ textarea {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-  }
-}
-
 /* Attack-chain lab -------------------------------------------------- */
 
 .lab-intro {
@@ -1682,7 +1673,7 @@ textarea {
 }
 
 .lab-step[data-status="skipped"] {
-  opacity: 0.55;
+  border-style: dashed;
 }
 
 .lab-step-top {
@@ -2053,5 +2044,14 @@ textarea {
 
   .lab-diff-row {
     grid-template-columns: minmax(120px, 1.4fr) minmax(90px, 1fr) minmax(90px, 1fr) minmax(140px, 1.5fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }

@@ -74,7 +74,7 @@ Read these numbers for what they are. The corpus was written by the same author 
 Node 18 or newer, nothing to install.
 
 ```bash
-npm test                 # 551 tests: shell parser, capability gate, hardening, receipts, exports, shortcuts, page checks, attack lab, lattice, policy reports, self-tests
+npm test                 # 556 tests: shell parser, capability gate, hardening, receipts, exports, shortcuts, page checks, attack lab, lattice, policy reports, self-tests
 npm run eval             # benchmark table
 npm run eval:check       # fails if CapGate drops below F1 0.98, gains a false positive, or stops beating both baselines
 npm run eval:json        # full report with every row
