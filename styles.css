@@ -1475,6 +1475,33 @@ textarea {
 }
 
 @media (max-width: 560px) {
+  .btn,
+  .btn-small,
+  .family-chip {
+    min-height: 44px;
+  }
+
+  .family-chip {
+    min-width: 44px;
+    text-align: center;
+  }
+
+  .switch-field {
+    min-height: 44px;
+  }
+
+  .footer a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .skip-link {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+
   .topbar-inner,
   .page,
   .footer {
@@ -2053,5 +2080,245 @@ textarea {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  @page {
+    size: Letter;
+    margin: 0.45in;
+  }
+
+  :root,
+  html[data-theme="dark"] {
+    color-scheme: light;
+    --bg: #FFFFFF;
+    --surface: #FFFFFF;
+    --surface-2: #F7F8FB;
+    --surface-3: #EFF2F6;
+    --ink: #111827;
+    --ink-2: #374151;
+    --ink-3: #4B5563;
+    --line: #9CA3AF;
+    --line-2: #6B7280;
+    --accent: #0B67D0;
+    --accent-ink: #0A4FA0;
+    --accent-soft: #EEF4FB;
+    --deny: #A11D24;
+    --deny-soft: #FDECEC;
+    --deny-ink: #8F1D23;
+    --allow: #0E6049;
+    --allow-soft: #E7F4EE;
+    --allow-ink: #0E6049;
+    --warn: #8A4B00;
+    --warn-soft: #FFF4E5;
+    --code-bg: #111827;
+    --code-ink: #F9FAFB;
+    --shadow: none;
+  }
+
+  html,
+  body {
+    overflow: visible;
+    background: #FFFFFF !important;
+    color: #111827;
+  }
+
+  body {
+    font-size: 10pt;
+    line-height: 1.35;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    box-shadow: none !important;
+  }
+
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  .skip-link,
+  .topbar-actions,
+  .proof-controls,
+  .family-chips,
+  .attack-edit,
+  .attack-live,
+  #proof-trace,
+  .left-rail,
+  .tool-inputs,
+  .split-detail,
+  .bench-actions,
+  .lab-policy-cards,
+  .lab-compare,
+  .matrix-scroll,
+  .lab-legend,
+  .lab-selftest,
+  .lab-verify,
+  .verify-panel,
+  .footer {
+    display: none !important;
+  }
+
+  .topbar {
+    position: static;
+    border-bottom: 0;
+    background: transparent;
+    backdrop-filter: none;
+  }
+
+  .topbar-inner {
+    max-width: none;
+    padding: 0 0 8px;
+    border-bottom: 1px solid var(--line-2);
+  }
+
+  .brand-mark {
+    width: 22px;
+    height: 22px;
+  }
+
+  .brand-title {
+    font-size: 16pt;
+  }
+
+  .page {
+    max-width: none;
+    padding: 0;
+    gap: 10px;
+  }
+
+  .proof,
+  .panel {
+    padding: 10px;
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    background: #FFFFFF;
+    break-inside: avoid;
+  }
+
+  .proof-head,
+  .panel-head {
+    margin-bottom: 6px;
+  }
+
+  .section-title {
+    font-size: 15pt;
+  }
+
+  .sub-title,
+  .panel-title {
+    font-size: 9pt;
+  }
+
+  .hero-decision {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.5fr);
+    gap: 8px;
+  }
+
+  .hero-decision-word,
+  .hero-diff,
+  .proof-attack,
+  .verdict,
+  .score-cell,
+  .kpi-card,
+  .detector-card,
+  .lab-chain {
+    border: 1px solid var(--line);
+    background: #FFFFFF;
+    box-shadow: none;
+  }
+
+  .hero-verdict {
+    font-size: 28pt;
+    line-height: 1;
+  }
+
+  .hero-verdict-sub,
+  .proof-position,
+  .chip,
+  .kpi-foot,
+  .score-sub,
+  .muted,
+  .scope-note,
+  .lab-intro {
+    font-size: 7.5pt;
+  }
+
+  .proof-grid,
+  .workspace {
+    display: block;
+  }
+
+  .proof-attack {
+    margin-top: 8px;
+    padding: 8px;
+  }
+
+  .proof-command {
+    padding: 6px;
+    font-size: 7.5pt;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .verdicts,
+  .scorestrip,
+  .detector-cards,
+  .kpi-strip,
+  .lab-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .verdict,
+  .score-cell,
+  .kpi-card,
+  .detector-card {
+    padding: 6px;
+  }
+
+  .inspector-panel {
+    margin-top: 10px;
+  }
+
+  .benchmark-panel,
+  .lab-panel {
+    margin-top: 10px;
+  }
+
+  .lab-chain-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .lab-chain {
+    padding: 7px;
+    break-inside: avoid;
+  }
+
+  .lab-chain-head {
+    margin-bottom: 4px;
+  }
+
+  .lab-chain-title {
+    font-size: 8.5pt;
+  }
+
+  .lab-chain-narr {
+    font-size: 7.5pt;
+    line-height: 1.3;
+  }
+
+  .lab-steps {
+    display: none !important;
+  }
+
+  h3:has(+ .matrix-scroll) {
+    display: none !important;
   }
 }

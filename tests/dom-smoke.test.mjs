@@ -124,3 +124,30 @@ test('no real vendor key prefixes, assistant branding, or long dashes in shipped
     assert.equal(text.includes(String.fromCharCode(0x2014)) || text.includes(String.fromCharCode(0x2013)), false, `dash in ${file}`);
   }
 });
+
+test('mobile touch targets are at least 44px for buttons, chips, and the skip link', () => {
+  const mobileBlock = /@media \(max-width: 560px\) \{[\s\S]*?\n\}\n\n@media \(max-width: 1100px\)/.exec(cssText())?.[0] || cssText();
+  assert.match(mobileBlock, /\.btn,/);
+  assert.match(mobileBlock, /\.family-chip/);
+  assert.match(mobileBlock, /min-height:\s*44px/);
+  assert.match(mobileBlock, /min-width:\s*44px/);
+  assert.match(mobileBlock, /\.switch-field/);
+  assert.match(mobileBlock, /\.footer a/);
+  assert.match(mobileBlock, /\.skip-link/);
+});
+
+test('print stylesheet hides app controls and keeps a compact report layout', () => {
+  const printBlock = /@media print \{[\s\S]*$/.exec(cssText())?.[0] || '';
+  assert.ok(printBlock.length > 500, 'print stylesheet exists');
+  assert.match(printBlock, /@page/);
+  assert.match(printBlock, /button,/);
+  assert.match(printBlock, /textarea,/);
+  assert.match(printBlock, /\.topbar-actions/);
+  assert.match(printBlock, /\.verify-panel/);
+  assert.match(printBlock, /\.lab-chain-grid/);
+  assert.match(printBlock, /h3:has\(\+ \.matrix-scroll\)/);
+});
+
+function cssText() {
+  return fs.readFileSync(path.join(ROOT, 'styles.css'), 'utf8');
+}
