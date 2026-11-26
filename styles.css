@@ -2112,8 +2112,8 @@ textarea {
     --allow-ink: #0E6049;
     --warn: #8A4B00;
     --warn-soft: #FFF4E5;
-    --code-bg: #111827;
-    --code-ink: #F9FAFB;
+    --code-bg: #FFFFFF;
+    --code-ink: #111827;
     --shadow: none;
   }
 
@@ -2261,6 +2261,7 @@ textarea {
 
   .proof-command {
     padding: 6px;
+    border: 1px solid var(--line);
     font-size: 7.5pt;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
